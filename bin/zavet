@@ -106,7 +106,9 @@ cmd_init() {
     for t in INDEX.md RULES.md glossary.md; do
         cp "$tpl/$t" "$dest/$t"
     done
-    cp "$tpl/decision.md" "$dest/decisions/.template.md"
+    # The template lives OUTSIDE decisions/ — nothing but real D-*.md records
+    # may sit in there (dira captures that directory).
+    cp "$tpl/decision.md" "$dest/.template.md"
     printf 'zavet: scaffolded %s\n' "$dest"
     printf 'zavet: next steps — edit RULES.md, then record your first decision (/zavet:decide)\n'
 }
