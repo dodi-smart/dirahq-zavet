@@ -1,0 +1,14 @@
+{
+  "name": "dirahq",
+  "owner": {
+    "name": "DODI SMART OOD",
+    "url": "https://github.com/dodi-smart"
+  },
+  "plugins": [
+    {
+      "name": "zavet",
+      "source": "./",
+      "description": "Repo-local knowledge layer: decision records, guard hooks, git trailers — optionally correlated with dira time tracking."
+    }
+  ]
+}

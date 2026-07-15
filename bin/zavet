@@ -1,0 +1,231 @@
+#!/bin/sh
+# zavet — repo-local knowledge layer helper (decisions, guards, trailers).
+#
+# POSIX sh. Hard dependencies: git, awk, sed. `dira` is optional — every
+# integration point degrades to a no-op when it is absent.
+set -u
+
+ZAVET_DIR=".zavet"
+MARK_START="<!-- zavet:decisions:start -->"
+MARK_END="<!-- zavet:decisions:end -->"
+
+usage() {
+    cat <<'EOF'
+zavet — repo-local knowledge layer (decisions, guards, trailers)
+
+Usage:
+  zavet init                  Scaffold .zavet/ in the current git repo
+  zavet root                  Print repo toplevel (fails unless .zavet/ exists)
+  zavet next-id               Print the next decision id (D-NNNN)
+  zavet list                  Print TAB-separated: id, status, title
+  zavet guards                Print TAB-separated: id, guard glob (active only)
+  zavet match <path>          Print ids of active decisions guarding <path>
+                              (<path> is relative to the repo toplevel)
+  zavet decision-path <id>    Print the repo-relative path of a decision file
+  zavet index                 Regenerate the decisions block of .zavet/INDEX.md
+  zavet emit <kind> <id> [file]
+                              Fire a guard event to dira (silent no-op without dira)
+EOF
+}
+
+die() {
+    printf 'zavet: %s\n' "$1" >&2
+    exit 1
+}
+
+script_dir() {
+    CDPATH= cd -- "$(dirname -- "$0")" && pwd
+}
+
+repo_toplevel() {
+    git rev-parse --show-toplevel 2>/dev/null
+}
+
+# Toplevel of the repo that actually carries .zavet/ — or fail.
+zavet_root() {
+    top=$(repo_toplevel) || die "not inside a git repository"
+    [ -d "$top/$ZAVET_DIR" ] || die "no $ZAVET_DIR/ in $top (run: zavet init)"
+    printf '%s\n' "$top"
+}
+
+# Parse one decision file's frontmatter.
+#   mode=meta   -> "id<TAB>status<TAB>title"
+#   mode=guards -> "id<TAB>status<TAB>glob" (one line per glob)
+frontmatter() {
+    awk -v mode="$2" '
+        NR == 1 { if ($0 != "---") exit; fm = 1; next }
+        fm && /^---[ \t]*$/ { exit }
+        !fm { next }
+        /^id:/     { s = $0; sub(/^id:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); id = s; next_guard = 0; next }
+        /^status:/ { s = $0; sub(/^status:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); status = s; next }
+        /^title:/  { s = $0; sub(/^title:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); title = s; next }
+        /^guards:[ \t]*\[/ {
+            s = $0; sub(/^guards:[ \t]*\[/, "", s); sub(/\][ \t]*$/, "", s)
+            n = split(s, a, ",")
+            for (i = 1; i <= n; i++) {
+                g = a[i]
+                gsub(/^[ \t"'\'']+/, "", g); gsub(/[ \t"'\'']+$/, "", g)
+                if (g != "") guards[++ng] = g
+            }
+            next
+        }
+        /^guards:[ \t]*$/ { inguards = 1; next }
+        inguards && /^[ \t]+-[ \t]*/ {
+            g = $0; sub(/^[ \t]+-[ \t]*/, "", g)
+            gsub(/^["'\'']/, "", g); gsub(/["'\''][ \t]*$/, "", g)
+            if (g != "") guards[++ng] = g
+            next
+        }
+        inguards && !/^[ \t]/ { inguards = 0 }
+        END {
+            if (id == "") exit
+            if (status == "") status = "active"
+            if (mode == "meta") { print id "\t" status "\t" title; exit }
+            for (i = 1; i <= ng; i++) print id "\t" status "\t" guards[i]
+        }
+    ' "$1"
+}
+
+each_decision() { # $1 = root
+    for f in "$1/$ZAVET_DIR"/decisions/D-*.md; do
+        [ -e "$f" ] || continue
+        printf '%s\n' "$f"
+    done
+}
+
+cmd_init() {
+    top=$(repo_toplevel) || die "not inside a git repository"
+    tpl="$(script_dir)/../templates"
+    [ -d "$tpl" ] || die "templates not found at $tpl"
+    dest="$top/$ZAVET_DIR"
+    if [ -d "$dest" ]; then
+        printf 'zavet: %s already exists — nothing to do\n' "$dest"
+        return 0
+    fi
+    mkdir -p "$dest/decisions" "$dest/specs"
+    for t in INDEX.md RULES.md glossary.md; do
+        cp "$tpl/$t" "$dest/$t"
+    done
+    cp "$tpl/decision.md" "$dest/decisions/.template.md"
+    printf 'zavet: scaffolded %s\n' "$dest"
+    printf 'zavet: next steps — edit RULES.md, then record your first decision (/zavet:decide)\n'
+}
+
+cmd_next_id() {
+    root=$(zavet_root)
+    max=$(each_decision "$root" | awk -F/ '{
+        f = $NF
+        sub(/^D-/, "", f)
+        sub(/[-.].*$/, "", f)
+        if (f ~ /^[0-9]+$/) { n = f + 0; if (n > max) max = n }
+    } END { print max + 0 }')
+    printf 'D-%04d\n' $((max + 1))
+}
+
+cmd_list() {
+    root=$(zavet_root)
+    each_decision "$root" | while IFS= read -r f; do
+        frontmatter "$f" meta
+    done
+}
+
+cmd_guards() {
+    root=$(zavet_root)
+    each_decision "$root" | while IFS= read -r f; do
+        frontmatter "$f" guards
+    done | awk -F '\t' '$2 == "active" && $3 != "" { print $1 "\t" $3 }'
+}
+
+cmd_match() {
+    [ $# -ge 1 ] || die "usage: zavet match <repo-relative-path>"
+    rel=$1
+    cmd_guards | while IFS="$(printf '\t')" read -r id glob; do
+        # `case` patterns do not treat "/" specially, so a single "*" already
+        # crosses directories; collapse "**" and make dir globs prefix-match.
+        pat=$(printf '%s' "$glob" | sed 's/\*\*/\*/g')
+        case "$pat" in */) pat="${pat}*" ;; esac
+        # shellcheck disable=SC2254
+        case "$rel" in $pat) printf '%s\n' "$id" ;; esac
+    done | sort -u
+}
+
+cmd_decision_path() {
+    [ $# -ge 1 ] || die "usage: zavet decision-path <id>"
+    root=$(zavet_root)
+    found=$(each_decision "$root" | while IFS= read -r f; do
+        got=$(frontmatter "$f" meta | awk -F '\t' '{ print $1 }')
+        if [ "$got" = "$1" ]; then
+            printf '%s\n' "$f"
+            break
+        fi
+    done)
+    [ -n "$found" ] || die "no decision with id $1"
+    printf '%s\n' "${found#"$root"/}"
+}
+
+cmd_index() {
+    root=$(zavet_root)
+    idx="$root/$ZAVET_DIR/INDEX.md"
+    [ -f "$idx" ] || die "missing $idx"
+    blockfile="$idx.block.$$"
+    cmd_list | sort | awk -F '\t' '{
+        line = "- **" $1 "**"
+        if ($3 != "") line = line " — " $3
+        line = line " (" $2 ")"
+        print line
+    }' >"$blockfile"
+    tmp="$idx.tmp.$$"
+    # BSD awk rejects newlines in -v strings, so the block travels as a file.
+    awk -v start="$MARK_START" -v end="$MARK_END" -v blockfile="$blockfile" '
+        $0 == start {
+            print
+            while ((getline line < blockfile) > 0) print line
+            skipping = 1
+            next
+        }
+        $0 == end { skipping = 0; print; next }
+        !skipping { print }
+    ' "$idx" >"$tmp" && mv "$tmp" "$idx"
+    rm -f "$blockfile"
+    printf 'zavet: index updated\n'
+}
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+cmd_emit() {
+    [ $# -ge 2 ] || die "usage: zavet emit <kind> <decision-id> [file-path]"
+    command -v dira >/dev/null 2>&1 || return 0
+    kind=$1
+    id=$2
+    file=${3:-}
+    cwd=$(repo_toplevel || pwd)
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    json=$(printf '{"v":1,"kind":"%s","decision_id":"%s","file_path":"%s","cwd":"%s","ts":"%s"}' \
+        "$(json_escape "$kind")" "$(json_escape "$id")" "$(json_escape "$file")" \
+        "$(json_escape "$cwd")" "$ts")
+    # Fire-and-forget: a missing daemon or an older dira must never slow a hook.
+    printf '%s' "$json" | dira zavet emit >/dev/null 2>&1 &
+    return 0
+}
+
+[ $# -ge 1 ] || { usage; exit 1; }
+cmd=$1
+shift
+case "$cmd" in
+    init) cmd_init "$@" ;;
+    root) zavet_root ;;
+    next-id) cmd_next_id ;;
+    list) cmd_list ;;
+    guards) cmd_guards ;;
+    match) cmd_match "$@" ;;
+    decision-path) cmd_decision_path "$@" ;;
+    index) cmd_index ;;
+    emit) cmd_emit "$@" ;;
+    help | -h | --help) usage ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac
