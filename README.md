@@ -55,7 +55,8 @@ silently no-op without it). `dira` is optional.
 |---|---|
 | `/zavet:init` | Scaffold `.zavet/{INDEX.md,RULES.md,decisions/,specs/,glossary.md}` |
 | `/zavet:decide` | Record a structural decision as an append-only `D-NNNN` record with guards |
-| `/zavet:why` | Answer a "why" question from recorded knowledge, with citations |
+| `/zavet:why` | Answer a "why" question from recorded knowledge, with citations (and time cost via dira when present) |
+| `/zavet:wiki` | Browse the knowledge base wiki-style — rules, decisions, glossary, recent rationale |
 | `/zavet:backfill` | Reverse-engineer an existing codebase into decision records — proposed to you first, written as `verified: false` hypotheses with open questions, never invented rationale |
 
 The `bin/zavet` helper is also usable directly (and from CI):
