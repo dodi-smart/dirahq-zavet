@@ -10,8 +10,8 @@ command -v git >/dev/null 2>&1 || exit 0
 ZAVET="${CLAUDE_PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}/bin/zavet"
 [ -x "$ZAVET" ] || exit 0
 
-root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-[ -d "$root/.zavet" ] || exit 0
+# zavet root already fails unless the toplevel carries .zavet/.
+root=$("$ZAVET" root 2>/dev/null) || exit 0
 
 printf '## Zavet knowledge layer (this repo records decisions in .zavet/)\n\n'
 

@@ -69,11 +69,5 @@ done
 
 reason=$(printf 'This path is guarded by recorded decision(s) you have not seen this session. Read them, honor their constraints (or supersede them via /zavet:decide), then retry the edit — it will be allowed.\n%s' "$reason")
 
-jq -n --arg reason "$reason" '{
-    hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: $reason
-    }
-}'
+"$ZAVET" deny "$reason"
 exit 0
