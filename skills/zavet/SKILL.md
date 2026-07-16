@@ -1,13 +1,13 @@
 ---
 name: zavet
-description: Use when working in a repository that has a .zavet/ directory — defines when and how to capture decisions (commit trailers vs decision records), how guards work, and the honesty rules for recorded knowledge.
+description: Use when working in a repository that has a .zavet/ directory — defines when and how to capture decisions (commit trailers vs decision records), how to keep living feature specs current, how guards work, and the honesty rules for recorded knowledge.
 ---
 
-# Zavet — capturing decisions as a byproduct of work
+# Zavet — capturing knowledge as a byproduct of work
 
 This repo records the *reasoning* behind its code in `.zavet/`. Your job while
-working here: leave no non-obvious decision unrecorded, and never contradict a
-recorded decision silently.
+working here: leave no non-obvious decision unrecorded, keep the living specs
+current, and never contradict a recorded decision silently.
 
 ## The capture bar
 
@@ -32,6 +32,32 @@ One line each; multiple trailers per commit are fine.
 **Structural decisions → /zavet:decide.** Anything that shapes future changes
 (architecture choices, invariants, deliberate non-obvious behavior) becomes an
 append-only `D-NNNN` record with `guards:` globs over the code it shapes.
+
+## Living specs — maintained transparently, not on request
+
+`.zavet/specs/<slug>.md` are sectioned living documents describing features.
+**Maintaining them is part of implementing, not a separate task the human
+asks for.** While working:
+
+- Changing behavior a spec covers (its `paths:` globs)? Update the affected
+  sections, bump `date:`, reference new decisions, and stage the spec file
+  with your commit.
+- Building a substantial new feature with no covering spec? Create one from
+  `.zavet/.spec-template.md` with `origin: session` — you just wrote the code,
+  so the claims are fresh; `confidence: high` is normal.
+- Either way, add a `Spec: <slug>` trailer to the commit. The commit hook
+  nudges once per session if staged work touches spec-covered paths without
+  the spec staged or the trailer present — satisfy it for real, don't
+  trailer-spam your way past it.
+- Link decisions from specs, never the reverse: specs are living, decisions
+  are append-only. A `decisions: [D-NNNN]` frontmatter list and inline D-refs
+  in the body both auto-link.
+- Never flip `verified: true` yourself — that is the human confirming the
+  spec matches the code.
+
+Explicit entry points exist for the non-default flows: `/zavet:spec design
+<feature>` (spec before code) and `/zavet:spec backfill <feature>`
+(reconstruct from existing code, honesty rules apply).
 
 ## Honoring guards
 

@@ -1,0 +1,47 @@
+---
+title: Short noun phrase naming the feature
+version: 1
+# origin — HOW this spec was produced:
+#   designed           written before the code existed (intent)
+#   session            distilled from work just completed in an agent session
+#   reverse-engineered reconstructed from existing code (a hypothesis)
+origin: session
+# verified: true ONLY after a human confirms the spec matches the code —
+# whatever the origin. Everything else is cited as unverified.
+verified: false
+# confidence — low | med | high, self-assessed coverage.
+confidence: med
+date: 1970-01-01
+# Git pathspecs the spec covers. `*`/`**` glob; commits touching these after
+# the spec's last update mark it stale. For `designed` specs the paths may
+# not exist yet — staleness starts once commits touch them.
+paths:
+  - path/or/glob/this/spec/covers/**
+# Decisions that shaped this feature. Optional — D-NNNN references anywhere
+# in the body are auto-linked too.
+decisions: []
+---
+
+## Overview
+
+What the feature is and why it exists, in a few sentences.
+
+## Behavior
+
+What it does, as observable behavior. For `reverse-engineered` specs every
+claim here must be traceable to a file actually read — never invented.
+
+## Interfaces & data
+
+Entry points, commands, schemas, wire formats, storage.
+
+## Invariants
+
+What must stay true. Reference the decisions behind them (D-NNNN) — the ids
+auto-link.
+
+## Open Questions
+
+Mandatory and NON-EMPTY for `reverse-engineered` specs: what could not be
+reconstructed. Recommended for the rest: what is still undecided or unclear.
+A wrong recorded claim is worse than none.
