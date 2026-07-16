@@ -67,24 +67,33 @@ frontmatter() {
     shift
     [ $# -gt 0 ] || return 0
     awk -v mode="$mode" '
+        # Inline `# comments` are allowed on structured lines — NEVER on
+        # title, which is free text. Same dialect as dira-core::zavet.
+        function decomment(s) {
+            if (s ~ /^#/) return ""
+            if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
+            return s
+        }
         function flush() {
-            if (id != "") {
+            # `closed` gates emission: an unclosed --- fence is malformed and
+            # yields nothing, matching the Rust parser.
+            if (id != "" && closed) {
                 if (status == "") status = "active"
                 if (mode == "meta") print id "\t" status "\t" title
                 else if (status == "active")
                     for (i = 1; i <= ng; i++) print id "\t" guards[i]
             }
             id = ""; status = ""; title = ""; ng = 0
-            fm = 0; done = 0; inguards = 0
+            fm = 0; done = 0; closed = 0; inguards = 0
         }
         FNR == 1 { flush(); if ($0 == "---") fm = 1; else done = 1; next }
         done { next }
-        fm && /^---[ \t]*$/ { done = 1; next }
-        /^id:/     { s = $0; sub(/^id:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); id = s; next }
-        /^status:/ { s = $0; sub(/^status:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); status = s; next }
+        fm && /^---[ \t]*$/ { done = 1; closed = 1; next }
+        /^id:/     { s = $0; sub(/^id:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); id = s; next }
+        /^status:/ { s = $0; sub(/^status:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); status = s; next }
         /^title:/  { s = $0; sub(/^title:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); title = s; next }
         /^guards:[ \t]*\[/ {
-            s = $0; sub(/^guards:[ \t]*\[/, "", s); sub(/\][ \t]*$/, "", s)
+            s = $0; sub(/^guards:[ \t]*\[/, "", s); sub(/\][ \t]*(#.*)?$/, "", s)
             n = split(s, a, ",")
             for (i = 1; i <= n; i++) {
                 g = a[i]
@@ -93,9 +102,10 @@ frontmatter() {
             }
             next
         }
-        /^guards:[ \t]*$/ { inguards = 1; next }
+        /^guards:[ \t]*(#.*)?$/ { inguards = 1; next }
         inguards && /^[ \t]+-[ \t]*/ {
             g = $0; sub(/^[ \t]+-[ \t]*/, "", g)
+            g = decomment(g)
             gsub(/^["'\'']/, "", g); gsub(/["'\''][ \t]*$/, "", g)
             if (g != "") guards[++ng] = g
             next
@@ -127,19 +137,24 @@ spec_frontmatter() {
         }
         # Inline `# comments` are allowed on structured lines (origin,
         # confidence, date, paths) — NEVER on title, which is free text.
+        # Same dialect as dira-core::zavet, including a value that IS a
+        # comment blanking to empty (so defaults apply).
         function decomment(s) {
+            if (s ~ /^#/) return ""
             if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
             return s
         }
         function flush() {
-            if (slug != "") {
+            # `closed` gates emission: an unclosed --- fence is malformed and
+            # yields nothing, matching the Rust parser.
+            if (slug != "" && closed) {
                 if (origin == "") origin = "reverse-engineered"
                 if (conf == "") conf = "low"
                 if (mode == "meta") print slug "\t" origin "\t" conf "\t" date "\t" title
                 else for (i = 1; i <= np; i++) print slug "\t" paths[i]
             }
             slug = ""; origin = ""; conf = ""; date = ""; title = ""; np = 0
-            fm = 0; done = 0; inpaths = 0
+            fm = 0; done = 0; closed = 0; inpaths = 0
         }
         FNR == 1 {
             flush()
@@ -147,7 +162,7 @@ spec_frontmatter() {
             next
         }
         done { next }
-        fm && /^---[ \t]*$/ { done = 1; next }
+        fm && /^---[ \t]*$/ { done = 1; closed = 1; next }
         /^title:/      { s = $0; sub(/^title:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); title = s; next }
         /^origin:/     { s = $0; sub(/^origin:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); origin = s; next }
         /^confidence:/ { s = $0; sub(/^confidence:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); conf = s; next }
@@ -175,15 +190,6 @@ spec_frontmatter() {
     ' "$@"
 }
 
-# Spec files are flat kebab-case <slug>.md; the sh glob never matches the
-# dot-prefixed .spec-template.md, so no explicit template filter is needed.
-# NB: `set --` repurposes $1 — after it, $1 is the first glob expansion
-# (the unexpanded pattern itself on a miss, hence the -e check).
-spec_files() { # $1 = root
-    set -- "$1/$ZAVET_DIR"/specs/*.md
-    [ -e "$1" ] || return 0
-    printf '%s\n' "$@"
-}
 
 cmd_init() {
     top=$(repo_toplevel) || die "not inside a git repository"
@@ -297,30 +303,20 @@ cmd_match_batch() {
     run_match "$(cmd_guards)"
 }
 
+# Spec files are flat kebab-case <slug>.md; the sh glob never matches the
+# dot-prefixed .spec-template.md, so no explicit template filter is needed.
 cmd_specs() {
     root=$(zavet_root)
-    files=$(spec_files "$root")
-    [ -n "$files" ] || return 0
-    set --
-    while IFS= read -r f; do
-        set -- "$@" "$f"
-    done <<EOF
-$files
-EOF
+    set -- "$root/$ZAVET_DIR"/specs/*.md
+    [ -e "$1" ] || return 0
     spec_frontmatter meta "$@"
 }
 
 # "slug<TAB>glob" for every spec — the coverage table spec-match runs against.
 cmd_spec_paths() {
     root=$(zavet_root)
-    files=$(spec_files "$root")
-    [ -n "$files" ] || return 0
-    set --
-    while IFS= read -r f; do
-        set -- "$@" "$f"
-    done <<EOF
-$files
-EOF
+    set -- "$root/$ZAVET_DIR"/specs/*.md
+    [ -e "$1" ] || return 0
     spec_frontmatter paths "$@"
 }
 
