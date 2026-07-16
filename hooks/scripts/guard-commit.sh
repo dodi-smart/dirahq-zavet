@@ -24,19 +24,15 @@ cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
 printf '%s\n' "$cmd" | grep -qE '(^|[;&|[:space:]])git[[:space:]]([^;&|]*[[:space:]])?commit([[:space:]]|$)' || exit 0
 
 [ -n "$cwd" ] && [ -d "$cwd" ] || cwd=.
-root=$(cd -- "$cwd" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || exit 0
+# zavet root already fails unless the toplevel carries .zavet/.
+root=$(cd -- "$cwd" 2>/dev/null && "$ZAVET" root 2>/dev/null) || exit 0
 [ -n "$root" ] || exit 0
-[ -d "$root/.zavet" ] || exit 0
 
-staged=$(cd -- "$root" && git diff --cached --name-only 2>/dev/null)
-[ -n "$staged" ] || exit 0
-
-# Newline-safe over staged paths (ids themselves never contain spaces).
-guarded=$(printf '%s\n' "$staged" | while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    (cd -- "$root" && "$ZAVET" match "$f") 2>/dev/null
-done | sort -u | tr '\n' ' ')
-guarded=$(printf '%s' "$guarded" | sed 's/[[:space:]]*$//')
+# One batch call: the guards table is built once and every staged path
+# (newline-safe, spaces included) is matched with shell builtins.
+guarded=$(cd -- "$root" && git diff --cached --name-only 2>/dev/null |
+    "$ZAVET" match-batch 2>/dev/null | tr '\n' ' ')
+guarded=${guarded% }
 [ -n "$guarded" ] || exit 0
 
 # The agent commits with -m/heredoc, so the trailer is visible in the command
@@ -57,14 +53,9 @@ for id in $guarded; do
     (cd -- "$root" && "$ZAVET" emit guard_blocked "$id" "") 2>/dev/null || true
 done
 
+first=${guarded%% *}
 reason=$(printf 'Staged changes touch paths guarded by: %s. Reference the decision in the commit message with a trailer — `Refs: %s` if the change complies with it, or `Supersedes: %s` (after recording the replacement decision via /zavet:decide) if it intentionally replaces it. Then retry the commit.' \
-    "$guarded" "$(printf '%s' "$guarded" | awk '{print $1}')" "$(printf '%s' "$guarded" | awk '{print $1}')")
+    "$guarded" "$first" "$first")
 
-jq -n --arg reason "$reason" '{
-    hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: $reason
-    }
-}'
+"$ZAVET" deny "$reason"
 exit 0
