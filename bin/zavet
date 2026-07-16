@@ -8,6 +8,8 @@ set -u
 ZAVET_DIR=".zavet"
 MARK_START="<!-- zavet:decisions:start -->"
 MARK_END="<!-- zavet:decisions:end -->"
+MARK_SPECS_START="<!-- zavet:specs:start -->"
+MARK_SPECS_END="<!-- zavet:specs:end -->"
 
 usage() {
     cat <<'EOF'
@@ -24,7 +26,10 @@ Usage:
   zavet match-batch           Read repo-relative paths (one per line) on stdin,
                               print unique ids of active decisions guarding them
   zavet decision-path <id>    Print the repo-relative path of a decision file
-  zavet index                 Regenerate the decisions block of .zavet/INDEX.md
+  zavet specs                 Print TAB-separated: slug, origin, confidence, date, title
+  zavet spec-match            Read repo-relative paths (one per line) on stdin,
+                              print unique slugs of specs whose paths cover them
+  zavet index                 Regenerate the decisions + specs blocks of .zavet/INDEX.md
   zavet deny <reason>         Print a PreToolUse permission-deny JSON (for hooks)
   zavet emit <kind> <id> [file]
                               Fire a guard event to dira (silent no-op without dira)
@@ -107,6 +112,79 @@ each_decision() { # $1 = root
     done
 }
 
+# Parse spec-file frontmatter — MANY files in a single awk pass, same per-file
+# reset discipline as frontmatter(). The slug is the filename minus .md (the
+# filename convention is load-bearing: dira captures .zavet/specs/ by name).
+#   spec_frontmatter meta  FILE...  -> "slug<TAB>origin<TAB>confidence<TAB>date<TAB>title"
+#   spec_frontmatter paths FILE...  -> "slug<TAB>path glob" (one line per glob)
+spec_frontmatter() {
+    mode=$1
+    shift
+    [ $# -gt 0 ] || return 0
+    awk -v mode="$mode" '
+        function slugof(f,    n, a, s) {
+            n = split(f, a, "/"); s = a[n]; sub(/\.md$/, "", s); return s
+        }
+        # Inline `# comments` are allowed on structured lines (origin,
+        # confidence, date, paths) — NEVER on title, which is free text.
+        function decomment(s) {
+            if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
+            return s
+        }
+        function flush() {
+            if (slug != "") {
+                if (origin == "") origin = "reverse-engineered"
+                if (conf == "") conf = "low"
+                if (mode == "meta") print slug "\t" origin "\t" conf "\t" date "\t" title
+                else for (i = 1; i <= np; i++) print slug "\t" paths[i]
+            }
+            slug = ""; origin = ""; conf = ""; date = ""; title = ""; np = 0
+            fm = 0; done = 0; inpaths = 0
+        }
+        FNR == 1 {
+            flush()
+            if ($0 == "---") { fm = 1; slug = slugof(FILENAME) } else done = 1
+            next
+        }
+        done { next }
+        fm && /^---[ \t]*$/ { done = 1; next }
+        /^title:/      { s = $0; sub(/^title:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); title = s; next }
+        /^origin:/     { s = $0; sub(/^origin:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); origin = s; next }
+        /^confidence:/ { s = $0; sub(/^confidence:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); conf = s; next }
+        /^date:/       { s = $0; sub(/^date:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); date = s; next }
+        /^paths:[ \t]*\[/ {
+            s = $0; sub(/^paths:[ \t]*\[/, "", s); sub(/\][ \t]*(#.*)?$/, "", s)
+            n = split(s, a, ",")
+            for (i = 1; i <= n; i++) {
+                g = a[i]
+                gsub(/^[ \t"'\'']+/, "", g); gsub(/[ \t"'\'']+$/, "", g)
+                if (g != "") paths[++np] = g
+            }
+            next
+        }
+        /^paths:[ \t]*(#.*)?$/ { inpaths = 1; next }
+        inpaths && /^[ \t]+-[ \t]*/ {
+            g = $0; sub(/^[ \t]+-[ \t]*/, "", g)
+            g = decomment(g)
+            gsub(/^["'\'']/, "", g); gsub(/["'\''][ \t]*$/, "", g)
+            if (g != "") paths[++np] = g
+            next
+        }
+        inpaths && !/^[ \t]/ { inpaths = 0 }
+        END { flush() }
+    ' "$@"
+}
+
+# Spec files are flat kebab-case <slug>.md; the sh glob never matches the
+# dot-prefixed .spec-template.md, so no explicit template filter is needed.
+# NB: `set --` repurposes $1 — after it, $1 is the first glob expansion
+# (the unexpanded pattern itself on a miss, hence the -e check).
+spec_files() { # $1 = root
+    set -- "$1/$ZAVET_DIR"/specs/*.md
+    [ -e "$1" ] || return 0
+    printf '%s\n' "$@"
+}
+
 cmd_init() {
     top=$(repo_toplevel) || die "not inside a git repository"
     tpl="$(script_dir)/../templates"
@@ -120,9 +198,10 @@ cmd_init() {
     for t in INDEX.md RULES.md glossary.md; do
         cp "$tpl/$t" "$dest/$t"
     done
-    # The template lives OUTSIDE decisions/ — nothing but real D-*.md records
-    # may sit in there (dira captures that directory).
+    # Templates live OUTSIDE decisions/ and specs/ — nothing but real records
+    # may sit in there (dira captures both directories by filename).
     cp "$tpl/decision.md" "$dest/.template.md"
+    cp "$tpl/spec.md" "$dest/.spec-template.md"
     printf 'zavet: scaffolded %s\n' "$dest"
     printf 'zavet: next steps — edit RULES.md, then record your first decision (/zavet:decide)\n'
 }
@@ -157,13 +236,14 @@ cmd_match() {
     printf '%s\n' "$1" | cmd_match_batch
 }
 
-# Read repo-relative paths one per line on stdin; print the id of every active
-# decision guarding at least one of them (unique, decision order — the same
-# sorted output the old per-path `match | sort -u` produced). The guards table
-# is fetched and normalised ONCE and matching is pure shell builtins — `case`
-# patterns do not treat "/" specially, so a single "*" already crosses
-# directories; "**" collapses to "*" and a trailing "/" prefix-matches.
-cmd_match_batch() {
+# Match repo-relative paths (stdin, one per line) against a "key<TAB>glob"
+# table ($1); print each key whose globs cover at least one path (unique,
+# table order). The table is normalised ONCE and matching is pure shell
+# builtins — `case` patterns do not treat "/" specially, so a single "*"
+# already crosses directories; "**" collapses to "*" and a trailing "/"
+# prefix-matches. Shared by decision guards and spec coverage.
+run_match() {
+    table=$1
     tab=$(printf '\t')
     nl='
 '
@@ -184,7 +264,7 @@ cmd_match_batch() {
         case "$pat" in */) pat="${pat}*" ;; esac
         set -- "$@" "${id}${tab}${pat}"
     done <<EOF
-$(cmd_guards)
+$table
 EOF
     [ $# -gt 0 ] || return 0
     paths=""
@@ -213,6 +293,41 @@ EOF
     done
 }
 
+cmd_match_batch() {
+    run_match "$(cmd_guards)"
+}
+
+cmd_specs() {
+    root=$(zavet_root)
+    files=$(spec_files "$root")
+    [ -n "$files" ] || return 0
+    set --
+    while IFS= read -r f; do
+        set -- "$@" "$f"
+    done <<EOF
+$files
+EOF
+    spec_frontmatter meta "$@"
+}
+
+# "slug<TAB>glob" for every spec — the coverage table spec-match runs against.
+cmd_spec_paths() {
+    root=$(zavet_root)
+    files=$(spec_files "$root")
+    [ -n "$files" ] || return 0
+    set --
+    while IFS= read -r f; do
+        set -- "$@" "$f"
+    done <<EOF
+$files
+EOF
+    spec_frontmatter paths "$@"
+}
+
+cmd_spec_match() {
+    run_match "$(cmd_spec_paths)"
+}
+
 cmd_decision_path() {
     [ $# -ge 1 ] || die "usage: zavet decision-path <id>"
     root=$(zavet_root)
@@ -233,6 +348,22 @@ cmd_decision_path() {
     printf '%s\n' "${found#"$root"/}"
 }
 
+# Replace the lines between two markers in $1 with the contents of $4.
+# BSD awk rejects newlines in -v strings, so the block travels as a file.
+replace_block() { # $1 = index file, $2 = start marker, $3 = end marker, $4 = blockfile
+    tmp="$1.tmp.$$"
+    awk -v start="$2" -v end="$3" -v blockfile="$4" '
+        $0 == start {
+            print
+            while ((getline line < blockfile) > 0) print line
+            skipping = 1
+            next
+        }
+        $0 == end { skipping = 0; print; next }
+        !skipping { print }
+    ' "$1" >"$tmp" && mv "$tmp" "$1"
+}
+
 cmd_index() {
     root=$(zavet_root)
     idx="$root/$ZAVET_DIR/INDEX.md"
@@ -244,19 +375,22 @@ cmd_index() {
         line = line " (" $2 ")"
         print line
     }' >"$blockfile"
-    tmp="$idx.tmp.$$"
-    # BSD awk rejects newlines in -v strings, so the block travels as a file.
-    awk -v start="$MARK_START" -v end="$MARK_END" -v blockfile="$blockfile" '
-        $0 == start {
-            print
-            while ((getline line < blockfile) > 0) print line
-            skipping = 1
-            next
-        }
-        $0 == end { skipping = 0; print; next }
-        !skipping { print }
-    ' "$idx" >"$tmp" && mv "$tmp" "$idx"
+    replace_block "$idx" "$MARK_START" "$MARK_END" "$blockfile"
     rm -f "$blockfile"
+    # The specs block regenerates only when its markers exist — repos
+    # scaffolded before the spec layer keep working untouched.
+    if grep -qF "$MARK_SPECS_START" "$idx" 2>/dev/null; then
+        blockfile="$idx.specs.$$"
+        cmd_specs | sort | awk -F '\t' '{
+            line = "- **" $1 "**"
+            if ($5 != "") line = line " — " $5
+            meta = $2 ", " $3
+            if ($4 != "") meta = meta ", " $4
+            print line " (" meta ")"
+        }' >"$blockfile"
+        replace_block "$idx" "$MARK_SPECS_START" "$MARK_SPECS_END" "$blockfile"
+        rm -f "$blockfile"
+    fi
     printf 'zavet: index updated\n'
 }
 
@@ -316,6 +450,8 @@ case "$cmd" in
     guards) cmd_guards ;;
     match) cmd_match "$@" ;;
     match-batch) cmd_match_batch ;;
+    specs) cmd_specs ;;
+    spec-match) cmd_spec_match ;;
     decision-path) cmd_decision_path "$@" ;;
     index) cmd_index ;;
     deny) cmd_deny "$@" ;;

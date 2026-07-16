@@ -12,7 +12,9 @@ Initialize the zavet knowledge layer in this repository.
    behaviors worth recording immediately as first decisions; if so, run
    /zavet:decide for each they can state from memory (those are recorded
    fact), and offer /zavet:backfill to reverse-engineer the rest of the
-   codebase into honestly-unverified records.
+   codebase into honestly-unverified records. For the features themselves,
+   offer `/zavet:spec backfill <feature>` (living specs) — going forward
+   specs stay current transparently as agents work.
 4. Suggest committing `.zavet/` with message `docs: initialize zavet knowledge layer`.
 
 Do not invent rationale for existing code — anything reverse-engineered must be

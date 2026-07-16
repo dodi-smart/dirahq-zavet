@@ -23,10 +23,18 @@ time, agent wall-clock, tokens) that produced it.
   paths without a `Refs:`/`Supersedes:` trailer is blocked.
 - **Commit trailers** — micro-decision capture in commit footers: `Why:`,
   `Rejected:`, `Constraint:`, `Refs:`, `Supersedes:`, `Spec:`.
+- **Living specs** — sectioned feature documents in `.zavet/specs/<slug>.md`,
+  **maintained transparently while agents work**: the skill instructs the
+  agent to keep the covering spec current as part of implementing, and the
+  commit hook nudges (once per session) when staged work touches spec-covered
+  paths without the spec staged or a `Spec:` trailer. PRs arrive carrying the
+  spec of what was implemented, the decisions that shaped it, and its
+  trailers — no command invoked.
 - **Index-first recall** — `/zavet:why` answers "why is it like this?" from
   `INDEX.md` → grep → at most 3 documents, with decision-id citations.
-- **Session context** — standing rules and the decision index are injected at
-  session start, so agents begin every session knowing what has been decided.
+- **Session context** — standing rules, the decision index, and the living
+  specs are injected at session start, so agents begin every session knowing
+  what has been decided.
 
 Everything is plain markdown + git. No daemon, no cloud, no lock-in: the
 `.zavet/` directory is fully functional offline and readable without any tool.
@@ -58,9 +66,11 @@ silently no-op without it). `dira` is optional.
 | `/zavet:why` | Answer a "why" question from recorded knowledge, with citations (and time cost via dira when present) |
 | `/zavet:wiki` | Browse the knowledge base wiki-style — rules, decisions, glossary, recent rationale |
 | `/zavet:backfill` | Reverse-engineer an existing codebase into decision records — proposed to you first, written as `verified: false` hypotheses with open questions, never invented rationale |
+| `/zavet:spec` | Living feature specs. Bare = *document* this session's work (normally happens transparently, no command needed); `design <feature>` = spec before code; `backfill <feature>` = reconstruct from existing code under the honesty rules |
 
 The `bin/zavet` helper is also usable directly (and from CI):
-`init · list · guards · match <path> · next-id · decision-path <id> · index · emit`.
+`init · list · guards · match <path> · specs · spec-match · next-id ·
+decision-path <id> · index · emit`.
 
 ## dira integration (optional)
 
@@ -127,6 +137,37 @@ Status transitions are append-only: the only permitted mutation is
 **Honesty rule:** knowledge reconstructed from existing code is marked
 `origin: reverse-engineered`, `verified: false`, with open questions instead of
 invented rationale. A wrong recorded "why" is worse than none.
+
+## Spec format
+
+Living documents in `.zavet/specs/<slug>.md` — flat kebab-case filenames (the
+slug is the identity; dira captures the directory by name). This frontmatter
+is the interface contract dira parses:
+
+```markdown
+---
+title: Zavet capture pipeline
+version: 1
+origin: session          # designed | session | reverse-engineered
+verified: false          # true only after a human confirms spec matches code
+confidence: high         # low | med | high
+date: 2026-07-16
+paths:                   # git pathspecs the spec covers (globs allowed)
+  - cli/dirad/src/capture.rs
+decisions: [D-0001]      # optional; body D-refs auto-link too
+---
+## Overview
+## Behavior
+## Interfaces & data
+## Invariants
+## Open Questions        <!-- mandatory + non-empty when reverse-engineered -->
+```
+
+Specs link decisions, never the reverse — decisions stay append-only, the
+living doc carries the pointers. With dira installed, commits touching a
+spec's `paths` after its last update mark it **stale** in `dira zavet wiki`,
+and `dira zavet why` resolves free-text questions against specs and decisions
+together.
 
 ## License
 

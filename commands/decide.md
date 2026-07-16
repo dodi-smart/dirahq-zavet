@@ -20,5 +20,8 @@ Record a decision: $ARGUMENTS
    `status: superseded` plus `superseded-by: <new-id>`. Never rewrite its body —
    records are append-only.
 4. Regenerate the index: `sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" index`
-5. Commit the new record (and index) with trailer `Refs: <id>`; when
+5. If a living spec in `.zavet/specs/` covers the area this decision shapes,
+   add the new id to that spec (its `decisions:` list or an inline reference
+   in the relevant section) — specs link decisions, never the reverse.
+6. Commit the new record (and index) with trailer `Refs: <id>`; when
    superseding, also add `Supersedes: <old-id>`.

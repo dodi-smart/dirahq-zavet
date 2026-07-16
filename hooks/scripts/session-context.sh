@@ -32,5 +32,16 @@ if [ -n "$decisions" ]; then
     }'
 fi
 
+specs=$(cd -- "$root" && "$ZAVET" specs 2>/dev/null)
+if [ -n "$specs" ]; then
+    printf '\n### Living specs (.zavet/specs/ — keep current while you work)\n\n'
+    printf '%s\n' "$specs" | sort | awk -F '\t' '{
+        line = "- " $1
+        if ($5 != "") line = line " — " $5
+        print line " (" $2 ", " $3 ")"
+    }'
+fi
+
 printf '\nCapture bar: record non-obvious choices a future reader could not reconstruct — micro-decisions as commit trailers (Why:/Rejected:/Constraint:/Refs:), structural ones via /zavet:decide.\n'
+printf 'Spec maintenance (do this as part of normal work, no command needed): when implementing or changing a feature, update its covering spec in .zavet/specs/ — or create one from .zavet/.spec-template.md (origin: session) for substantial new features — reference the decisions involved, and add a `Spec: <slug>` trailer to the commit.\n'
 exit 0

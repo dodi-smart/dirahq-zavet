@@ -1,5 +1,5 @@
 {
-  "description": "Zavet guard hooks: teach-before-change on guarded paths, trailer enforcement on commits, session context injection.",
+  "description": "Zavet guard hooks: teach-before-change on guarded paths, trailer enforcement on commits, spec-currency nudge, session context injection.",
   "hooks": {
     "SessionStart": [
       {
@@ -30,6 +30,11 @@
           {
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/guard-commit.sh\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/spec-commit.sh\"",
             "timeout": 10
           }
         ]
