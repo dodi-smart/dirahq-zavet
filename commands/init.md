@@ -10,7 +10,9 @@ Initialize the zavet knowledge layer in this repository.
    anything the maintainers repeatedly correct. Keep each rule to one line.
 3. Ask the user whether there are existing intentional-but-undocumented
    behaviors worth recording immediately as first decisions; if so, run
-   /zavet:decide for each.
+   /zavet:decide for each they can state from memory (those are recorded
+   fact), and offer /zavet:backfill to reverse-engineer the rest of the
+   codebase into honestly-unverified records.
 4. Suggest committing `.zavet/` with message `docs: initialize zavet knowledge layer`.
 
 Do not invent rationale for existing code — anything reverse-engineered must be
