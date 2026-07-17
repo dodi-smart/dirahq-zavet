@@ -34,6 +34,8 @@ Usage:
                               guarded paths without a Refs:/Supersedes:
                               trailer; warn on spec-covered paths without a
                               Spec: trailer (exit 1 only on violations)
+  zavet audit                 Report stale specs, stale decisions, and guard
+                              pressure as TAB-separated rows (report-only)
   zavet index                 Regenerate the decisions + specs blocks of .zavet/INDEX.md
   zavet deny <reason>         Print a PreToolUse permission-deny JSON (for hooks)
   zavet emit <kind> <id> [file]
@@ -443,6 +445,96 @@ cmd_decision_path() {
     printf '%s\n' "${found#"$root"/}"
 }
 
+# Report-only knowledge health sweep — deterministic facts as type-tagged
+# TSV; /zavet:audit interprets them, this prints and judges nothing.
+#
+#   stale-spec<TAB>slug<TAB>n-commits<TAB>since-sha7
+#   stale-decision<TAB>id<TAB>n-commits<TAB>since-sha7
+#   guard-pressure<TAB>id<TAB>glob<TAB>files-matched<TAB>total-tracked
+#
+# Staleness anchors on the record FILE's last commit — the same last_commit
+# semantics the dira daemon uses for wiki badges — never on the
+# self-reported `date:`. Stale counting walks git with `:(glob)` pathspecs
+# (daemon parity); guard pressure counts tracked files through
+# normalize_glob + `case` (hook parity) — each check mirrors the consumer
+# it feeds.
+cmd_audit() {
+    root=$(zavet_root) || exit 1
+    tab=$(printf '\t')
+    guards_table=$(cmd_guards)
+    specs_table=$(cmd_spec_paths)
+
+    # --- stale specs: commits touching a spec's paths since the spec file
+    # itself last changed. Never-committed specs are skipped (fresh).
+    for f in "$root/$ZAVET_DIR"/specs/*.md; do
+        [ -e "$f" ] || continue
+        slug=${f##*/}
+        slug=${slug%.md}
+        last=$(git -C "$root" log -1 --format=%H -- "$ZAVET_DIR/specs/$slug.md")
+        [ -n "$last" ] || continue
+        set --
+        while IFS="$tab" read -r s g; do
+            [ "$s" = "$slug" ] && [ -n "$g" ] && set -- "$@" ":(glob)$g"
+        done <<EOF
+$specs_table
+EOF
+        [ $# -gt 0 ] || continue
+        n=$(git -C "$root" log --format=%H "$last..HEAD" -- "$@" | wc -l)
+        n=$((n + 0))
+        [ "$n" -gt 0 ] || continue
+        printf 'stale-spec\t%s\t%s\t%s\n' "$slug" "$n" "$(git -C "$root" rev-parse --short "$last")"
+    done
+
+    [ -n "$guards_table" ] || return 0
+
+    # --- stale decisions: commits touching a decision's guard globs since
+    # the record file last changed — where code-vs-decision drift lives.
+    ids=$(printf '%s\n' "$guards_table" | awk -F '\t' '!seen[$1]++ { print $1 }')
+    for id in $ids; do
+        rel=$(cmd_decision_path "$id" 2>/dev/null) || continue
+        last=$(git -C "$root" log -1 --format=%H -- "$rel")
+        [ -n "$last" ] || continue
+        set --
+        while IFS="$tab" read -r i g; do
+            [ "$i" = "$id" ] && [ -n "$g" ] && set -- "$@" ":(glob)$g"
+        done <<EOF
+$guards_table
+EOF
+        [ $# -gt 0 ] || continue
+        n=$(git -C "$root" log --format=%H "$last..HEAD" -- "$@" | wc -l)
+        n=$((n + 0))
+        [ "$n" -gt 0 ] || continue
+        printf 'stale-decision\t%s\t%s\t%s\n' "$id" "$n" "$(git -C "$root" rev-parse --short "$last")"
+    done
+
+    # --- guard pressure: how many tracked files each active guard glob
+    # covers right now. No threshold here — the agent judges breadth.
+    files=$(git -C "$root" ls-files)
+    total=$(printf '%s\n' "$files" | wc -l)
+    total=$((total + 0))
+    set --
+    while IFS="$tab" read -r id glob; do
+        [ -n "$id" ] && [ -n "$glob" ] || continue
+        set -- "$@" "${id}${tab}${glob}"
+    done <<EOF
+$guards_table
+EOF
+    for entry; do
+        id=${entry%%"$tab"*}
+        glob=${entry#*"$tab"}
+        normalize_glob "$glob"
+        pat=$norm
+        matched=0
+        while IFS= read -r fpath; do
+            # shellcheck disable=SC2254
+            case "$fpath" in $pat) matched=$((matched + 1)) ;; esac
+        done <<EOF
+$files
+EOF
+        printf 'guard-pressure\t%s\t%s\t%s\t%s\n' "$id" "$glob" "$matched" "$total"
+    done
+}
+
 # Replace the lines between two markers in $1 with the contents of $4.
 # BSD awk rejects newlines in -v strings, so the block travels as a file.
 replace_block() { # $1 = index file, $2 = start marker, $3 = end marker, $4 = blockfile
@@ -549,6 +641,7 @@ case "$cmd" in
     spec-paths) cmd_spec_paths ;;
     spec-match) cmd_spec_match ;;
     check) cmd_check "$@" ;;
+    audit) cmd_audit ;;
     decision-path) cmd_decision_path "$@" ;;
     index) cmd_index ;;
     deny) cmd_deny "$@" ;;
