@@ -59,6 +59,7 @@ if [ -n "$guarded" ]; then
         done
         if printf '%s' "$cmd" | grep -qE 'Supersedes:[[:space:]]*D-[0-9]+'; then
             sup=$(printf '%s' "$cmd" | grep -oE 'Supersedes:[[:space:]]*D-[0-9]+' | head -1 | grep -oE 'D-[0-9]+')
+            # shellcheck disable=SC2015
             [ -n "$sup" ] && (cd -- "$root" && "$ZAVET" emit decision_superseded "$sup" "") 2>/dev/null || true
         fi
     else
