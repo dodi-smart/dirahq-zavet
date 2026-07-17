@@ -30,6 +30,10 @@ Usage:
   zavet spec-paths            Print TAB-separated: slug, path glob (every spec)
   zavet spec-match            Read repo-relative paths (one per line) on stdin,
                               print unique slugs of specs whose paths cover them
+  zavet check <rev-range>     CI floor: fail if commits in the range touch
+                              guarded paths without a Refs:/Supersedes:
+                              trailer; warn on spec-covered paths without a
+                              Spec: trailer (exit 1 only on violations)
   zavet index                 Regenerate the decisions + specs blocks of .zavet/INDEX.md
   zavet deny <reason>         Print a PreToolUse permission-deny JSON (for hooks)
   zavet emit <kind> <id> [file]
@@ -332,6 +336,93 @@ cmd_spec_match() {
     run_match "$(cmd_spec_paths)"
 }
 
+# CI enforcement floor over a commit range — the machine equivalent of the
+# guard-commit hook for environments without hooks. Every non-merge commit
+# whose changed files match an active guard glob must carry a
+# `Refs:`/`Supersedes:` trailer in its real message (hard fail); commits
+# touching spec-covered paths without a `Spec:` trailer and without touching
+# the covering spec file get a warning row (the hook is a nudge — CI must
+# not be stricter). Matching runs through the exact same tables and
+# run_match the hooks use, so CI semantics == hook semantics.
+#
+# stdout (TSV): violation<TAB>sha7<TAB>ids<TAB>subject
+#               warn-spec<TAB>sha7<TAB>slugs<TAB>subject
+# stderr: human summary. Exit 1 iff violations.
+cmd_check() {
+    [ $# -ge 1 ] || die "usage: zavet check <rev-range>"
+    top=$(repo_toplevel) || die "not inside a git repository"
+    # No .zavet/ → pass: one blanket org workflow may run on every repo.
+    if [ ! -d "$top/$ZAVET_DIR" ]; then
+        printf 'zavet check: no %s/ — nothing to enforce\n' "$ZAVET_DIR" >&2
+        return 0
+    fi
+    guards_table=$(cmd_guards)
+    specs_table=$(cmd_spec_paths)
+    if [ -z "$guards_table" ] && [ -z "$specs_table" ]; then
+        return 0
+    fi
+    tab=$(printf '\t')
+    nl='
+'
+    if ! all=$(git rev-list --no-merges "$@" --); then
+        if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+            die "cannot resolve range in a shallow clone — checkout with fetch-depth: 0"
+        fi
+        die "cannot resolve range: $*"
+    fi
+    [ -n "$all" ] || return 0
+    # Commits already carrying a trailer never violate — their diffs are
+    # never even listed. Regexes verbatim from the guard-commit hook.
+    refs_set="$nl$(git rev-list --no-merges -E --grep='(Refs|Supersedes):[[:space:]]*D-[0-9]+' "$@" --)$nl"
+    spec_set="$nl$(git rev-list --no-merges -E --grep='Spec:[[:space:]]*[a-z0-9][a-z0-9-]*' "$@" --)$nl"
+    violations=0
+    warnings=0
+    for sha in $all; do
+        need_guard=1
+        need_spec=1
+        [ -n "$guards_table" ] || need_guard=0
+        [ -n "$specs_table" ] || need_spec=0
+        case "$refs_set" in *"$nl$sha$nl"*) need_guard=0 ;; esac
+        case "$spec_set" in *"$nl$sha$nl"*) need_spec=0 ;; esac
+        [ $need_guard -eq 1 ] || [ $need_spec -eq 1 ] || continue
+        changed=$(git diff-tree -r --no-commit-id --name-only "$sha" --)
+        [ -n "$changed" ] || continue
+        info=""
+        if [ $need_guard -eq 1 ]; then
+            ids=$(printf '%s\n' "$changed" | run_match "$guards_table" | tr '\n' ' ')
+            ids=${ids% }
+            if [ -n "$ids" ]; then
+                violations=$((violations + 1))
+                info=$(git log -1 --format="%h${tab}%s" "$sha")
+                printf 'violation\t%s\t%s\t%s\n' "${info%%"$tab"*}" "$ids" "${info#*"$tab"}"
+            fi
+        fi
+        if [ $need_spec -eq 1 ]; then
+            slugs=$(printf '%s\n' "$changed" | run_match "$specs_table")
+            fresh=""
+            for slug in $slugs; do
+                # A commit that updates the covering spec itself needs no trailer.
+                printf '%s\n' "$changed" | grep -qxF "$ZAVET_DIR/specs/$slug.md" && continue
+                fresh="$fresh $slug"
+            done
+            fresh=${fresh# }
+            if [ -n "$fresh" ]; then
+                warnings=$((warnings + 1))
+                [ -n "$info" ] || info=$(git log -1 --format="%h${tab}%s" "$sha")
+                printf 'warn-spec\t%s\t%s\t%s\n' "${info%%"$tab"*}" "$fresh" "${info#*"$tab"}"
+            fi
+        fi
+    done
+    if [ "$violations" -gt 0 ]; then
+        printf 'zavet check: %s commit(s) touch guarded paths without a Refs:/Supersedes: trailer — amend or rebase to add them.\n' "$violations" >&2
+        return 1
+    fi
+    if [ "$warnings" -gt 0 ]; then
+        printf 'zavet check: %s commit(s) touch spec-covered paths without a Spec: trailer (warning only — keep specs current).\n' "$warnings" >&2
+    fi
+    return 0
+}
+
 cmd_decision_path() {
     [ $# -ge 1 ] || die "usage: zavet decision-path <id>"
     root=$(zavet_root)
@@ -457,6 +548,7 @@ case "$cmd" in
     specs) cmd_specs ;;
     spec-paths) cmd_spec_paths ;;
     spec-match) cmd_spec_match ;;
+    check) cmd_check "$@" ;;
     decision-path) cmd_decision_path "$@" ;;
     index) cmd_index ;;
     deny) cmd_deny "$@" ;;
