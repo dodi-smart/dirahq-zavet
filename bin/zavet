@@ -293,6 +293,7 @@ run_match() {
 '
     set --
     while IFS="$tab" read -r id glob; do
+        # shellcheck disable=SC2015
         [ -n "$id" ] && [ -n "$glob" ] || continue
         normalize_glob "$glob"
         set -- "$@" "${id}${tab}${norm}"
@@ -527,6 +528,7 @@ EOF
     total=$((total + 0))
     set --
     while IFS="$tab" read -r id glob; do
+        # shellcheck disable=SC2015
         [ -n "$id" ] && [ -n "$glob" ] || continue
         set -- "$@" "${id}${tab}${glob}"
     done <<EOF

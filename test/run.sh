@@ -54,6 +54,9 @@ new_repo() { # $1 dir
     mkdir -p "$1/.zavet/decisions" "$1/.zavet/specs"
 }
 
+# git in the CURRENT suite repo ($R) — one definition, every suite uses it.
+gc() { git -C "$R" "$@"; }
+
 # ---------------------------------------------------------------- dialect --
 printf -- '-- dialect\n'
 R="$TMP/dialect"
@@ -135,7 +138,6 @@ paths: [lib/**]
 ---
 body
 EOF
-gc() { git -C "$R" "$@"; }
 mkdir -p "$R/src/a" "$R/lib"
 gc add -A
 gc commit -qm "chore: scaffold"
@@ -197,7 +199,6 @@ paths: [lib/**]
 ---
 body
 EOF
-gc() { git -C "$R" "$@"; }
 mkdir -p "$R/src/b" "$R/lib"
 echo a >"$R/src/a.rs"
 echo c >"$R/src/b/c.rs"
