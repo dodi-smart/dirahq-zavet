@@ -67,10 +67,35 @@ silently no-op without it). `dira` is optional.
 | `/zavet:wiki` | Browse the knowledge base wiki-style — rules, decisions, glossary, recent rationale |
 | `/zavet:backfill` | Reverse-engineer an existing codebase into decision records — proposed to you first, written as `verified: false` hypotheses with open questions, never invented rationale |
 | `/zavet:spec` | Living feature specs. Bare = *document* this session's work (normally happens transparently, no command needed); `design <feature>` = spec before code; `backfill <feature>` = reconstruct from existing code under the honesty rules |
+| `/zavet:audit` | Report-only knowledge health sweep — code-vs-decision conflicts, stale specs, over-broad guards. Judges nothing it didn't open; changes nothing |
 
 The `bin/zavet` helper is also usable directly (and from CI):
-`init · list · guards · match <path> · specs · spec-match · next-id ·
-decision-path <id> · index · emit`.
+`init · list · guards · match <path> · match-batch · specs · spec-paths ·
+spec-match · check <range> · audit · next-id · decision-path <id> · index ·
+emit`.
+
+## CI enforcement
+
+`zavet check` is the enforcement floor for machines without hooks: over a
+commit range, any non-merge commit whose changed files match an **active
+guard glob** must carry a `Refs: D-NNNN` or `Supersedes: D-NNNN` trailer in
+its commit message — exactly the rule the commit hook applies interactively.
+Commits touching **spec-covered paths** without a `Spec: <slug>` trailer
+produce warnings only (the hook is a nudge; CI is not stricter). Exit code:
+`1` only on guard violations; repos without `.zavet/` pass, so one org-wide
+workflow is safe.
+
+```yaml
+- uses: actions/checkout@v4
+  with:
+    fetch-depth: 0            # zavet check walks real history
+- name: zavet guard floor
+  run: sh path/to/bin/zavet check "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+```
+
+For push builds: `git fetch origin main && sh bin/zavet check origin/main..HEAD`.
+Output is TSV (`violation`/`warn-spec` rows: sha, ids/slugs, subject) with a
+human summary on stderr.
 
 ## dira integration (optional)
 
