@@ -96,6 +96,21 @@ frontmatter() {
         FNR == 1 { flush(); if ($0 == "---") fm = 1; else done = 1; next }
         done { next }
         fm && /^---[ \t]*$/ { done = 1; closed = 1; next }
+        # Block-list discipline mirrors the Rust walker: a `- item` line
+        # (any indentation, space/tab after the dash) extends the list;
+        # other indented lines under it are tolerated and skipped; the
+        # first non-indented non-item line ENDS the list and is then
+        # parsed normally (so a key after the list terminates it).
+        inguards && /^[ \t]*-[ \t]/ {
+            g = $0; sub(/^[ \t]*-[ \t][ \t]*/, "", g)
+            g = decomment(g)
+            sub(/[ \t]+$/, "", g)
+            gsub(/^["'\'']/, "", g); gsub(/["'\''][ \t]*$/, "", g)
+            if (g != "") guards[++ng] = g
+            next
+        }
+        inguards && /^[ \t]+[^ \t]/ { next }
+        inguards { inguards = 0 }
         /^id:/     { s = $0; sub(/^id:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); id = s; next }
         /^status:/ { s = $0; sub(/^status:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); status = s; next }
         /^title:/  { s = $0; sub(/^title:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); title = s; next }
@@ -110,14 +125,6 @@ frontmatter() {
             next
         }
         /^guards:[ \t]*(#.*)?$/ { inguards = 1; next }
-        inguards && /^[ \t]+-[ \t]*/ {
-            g = $0; sub(/^[ \t]+-[ \t]*/, "", g)
-            g = decomment(g)
-            gsub(/^["'\'']/, "", g); gsub(/["'\''][ \t]*$/, "", g)
-            if (g != "") guards[++ng] = g
-            next
-        }
-        inguards && !/^[ \t]/ { inguards = 0 }
         END { flush() }
     ' "$@"
 }
@@ -170,6 +177,19 @@ spec_frontmatter() {
         }
         done { next }
         fm && /^---[ \t]*$/ { done = 1; closed = 1; next }
+        # Same block-list discipline as frontmatter(): item lines at any
+        # indentation, tolerated indented strays, list ended (then parsed)
+        # by the first non-indented non-item line.
+        inpaths && /^[ \t]*-[ \t]/ {
+            g = $0; sub(/^[ \t]*-[ \t][ \t]*/, "", g)
+            g = decomment(g)
+            sub(/[ \t]+$/, "", g)
+            gsub(/^["'\'']/, "", g); gsub(/["'\''][ \t]*$/, "", g)
+            if (g != "") paths[++np] = g
+            next
+        }
+        inpaths && /^[ \t]+[^ \t]/ { next }
+        inpaths { inpaths = 0 }
         /^title:/      { s = $0; sub(/^title:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); title = s; next }
         /^origin:/     { s = $0; sub(/^origin:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); origin = s; next }
         /^confidence:/ { s = $0; sub(/^confidence:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); conf = s; next }
@@ -185,14 +205,6 @@ spec_frontmatter() {
             next
         }
         /^paths:[ \t]*(#.*)?$/ { inpaths = 1; next }
-        inpaths && /^[ \t]+-[ \t]*/ {
-            g = $0; sub(/^[ \t]+-[ \t]*/, "", g)
-            g = decomment(g)
-            gsub(/^["'\'']/, "", g); gsub(/["'\''][ \t]*$/, "", g)
-            if (g != "") paths[++np] = g
-            next
-        }
-        inpaths && !/^[ \t]/ { inpaths = 0 }
         END { flush() }
     ' "$@"
 }
