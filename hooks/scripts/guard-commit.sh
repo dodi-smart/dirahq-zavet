@@ -17,6 +17,7 @@ set -u
 command -v jq >/dev/null 2>&1 || exit 0
 command -v git >/dev/null 2>&1 || exit 0
 
+# shellcheck disable=SC1007
 ZAVET="${CLAUDE_PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}/bin/zavet"
 [ -x "$ZAVET" ] || exit 0
 
@@ -65,6 +66,7 @@ if [ -n "$guarded" ]; then
             (cd -- "$root" && "$ZAVET" emit guard_blocked "$id" "") 2>/dev/null || true
         done
         first=${guarded%% *}
+        # shellcheck disable=SC2016
         reasons=$(printf 'Staged changes touch paths guarded by: %s. Reference the decision in the commit message with a trailer — `Refs: %s` if the change complies with it, or `Supersedes: %s` (after recording the replacement decision via /zavet:decide) if it intentionally replaces it.' \
             "$guarded" "$first" "$first")
     fi
@@ -91,6 +93,7 @@ if [ -n "$covering" ] && ! printf '%s' "$cmd" | grep -qE 'Spec:[[:space:]]*[a-z0
     fresh=${fresh# }
     if [ -n "$fresh" ]; then
         firstspec=${fresh%% *}
+        # shellcheck disable=SC2016
         nudge=$(printf 'Staged changes touch paths covered by spec(s): %s (see .zavet/specs/). Keep the living spec current: update the sections your change affects (and its decisions/date), stage the spec file with this commit, and add a `Spec: %s` trailer. If the spec truly needs no update, just add the trailer. This reminder fires once per session.' \
             "$fresh" "$firstspec")
         if [ -n "$reasons" ]; then

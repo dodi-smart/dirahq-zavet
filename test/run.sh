@@ -11,6 +11,7 @@
 #   audit   — staleness + guard-pressure sweeps over real history
 set -u
 
+# shellcheck disable=SC1007
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 1
 Z="$ROOT/bin/zavet"
 FIX="$ROOT/test/fixtures/dialect"
@@ -159,7 +160,11 @@ assert_eq "check exit 1 on violations" "1" "$rc"
 assert_eq "check rows (type+keys, sorted)" "violation	D-0001
 violation	D-0001
 warn-spec	cap" "$(printf '%s\n' "$out" | cut -f1,3 | sort)"
-grep -q "2 commit(s) touch guarded paths" "$TMP/check.err" && pass "check summary on stderr" || fail "check summary on stderr"
+if grep -q "2 commit(s) touch guarded paths" "$TMP/check.err"; then
+    pass "check summary on stderr"
+else
+    fail "check summary on stderr"
+fi
 
 out=$( (cd "$R" && sh "$Z" check "$base..$base" 2>/dev/null) )
 assert_eq "check empty range passes" "0:" "$?:$out"

@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # The macOS leg is load-bearing: it runs the real BSD awk and /bin/sh the
+  # plugin targets; ubuntu covers dash + gawk. Together they ARE the
+  # portability test for the frontmatter dialect.
+  test:
+    name: sh tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: run test suite
+        run: sh test/run.sh
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck bin/zavet hooks/scripts/*.sh test/*.sh
+
+  fixture-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: vendored fixtures match MANIFEST
+        run: sh test/sync-check.sh
+      # Soft until the dirahq-cli companion (canonical fixtures) merges to
+      # develop; flip continue-on-error off afterwards.
+      - name: canonical MANIFEST in dirahq-cli matches
+        continue-on-error: true
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/dodi-smart/dirahq-cli/develop/cli/core/testdata/zavet-dialect/MANIFEST" -o "$RUNNER_TEMP/canonical-manifest"
+          diff -u "$RUNNER_TEMP/canonical-manifest" test/fixtures/dialect/MANIFEST

@@ -13,6 +13,7 @@ set -u
 command -v jq >/dev/null 2>&1 || exit 0
 command -v git >/dev/null 2>&1 || exit 0
 
+# shellcheck disable=SC1007
 ZAVET="${CLAUDE_PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}/bin/zavet"
 [ -x "$ZAVET" ] || exit 0
 
