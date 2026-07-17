@@ -243,12 +243,30 @@ cmd_match() {
     printf '%s\n' "$1" | cmd_match_batch
 }
 
+# Normalise one guard/spec glob into a `case` pattern — sets $norm (no
+# subshell, hooks stay fork-free). `case` patterns do not treat "/"
+# specially, so a single "*" already crosses directories; "**" collapses
+# to "*" and a trailing "/" prefix-matches. The single normaliser shared
+# by run_match and the audit pressure counter — one dialect, zero drift.
+normalize_glob() {
+    norm=$1
+    while :; do
+        case "$norm" in
+            *"**"*)
+                head=${norm%%"**"*}
+                tail=${norm#*"**"}
+                norm="${head}*${tail}"
+                ;;
+            *) break ;;
+        esac
+    done
+    case "$norm" in */) norm="${norm}*" ;; esac
+}
+
 # Match repo-relative paths (stdin, one per line) against a "key<TAB>glob"
 # table ($1); print each key whose globs cover at least one path (unique,
 # table order). The table is normalised ONCE and matching is pure shell
-# builtins — `case` patterns do not treat "/" specially, so a single "*"
-# already crosses directories; "**" collapses to "*" and a trailing "/"
-# prefix-matches. Shared by decision guards and spec coverage.
+# builtins. Shared by decision guards and spec coverage.
 run_match() {
     table=$1
     tab=$(printf '\t')
@@ -257,19 +275,8 @@ run_match() {
     set --
     while IFS="$tab" read -r id glob; do
         [ -n "$id" ] && [ -n "$glob" ] || continue
-        pat=$glob
-        while :; do
-            case "$pat" in
-                *"**"*)
-                    head=${pat%%"**"*}
-                    tail=${pat#*"**"}
-                    pat="${head}*${tail}"
-                    ;;
-                *) break ;;
-            esac
-        done
-        case "$pat" in */) pat="${pat}*" ;; esac
-        set -- "$@" "${id}${tab}${pat}"
+        normalize_glob "$glob"
+        set -- "$@" "${id}${tab}${norm}"
     done <<EOF
 $table
 EOF
