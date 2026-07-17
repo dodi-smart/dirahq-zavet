@@ -27,6 +27,7 @@ Usage:
                               print unique ids of active decisions guarding them
   zavet decision-path <id>    Print the repo-relative path of a decision file
   zavet specs                 Print TAB-separated: slug, origin, confidence, date, title
+  zavet spec-paths            Print TAB-separated: slug, path glob (every spec)
   zavet spec-match            Read repo-relative paths (one per line) on stdin,
                               print unique slugs of specs whose paths cover them
   zavet index                 Regenerate the decisions + specs blocks of .zavet/INDEX.md
@@ -447,6 +448,7 @@ case "$cmd" in
     match) cmd_match "$@" ;;
     match-batch) cmd_match_batch ;;
     specs) cmd_specs ;;
+    spec-paths) cmd_spec_paths ;;
     spec-match) cmd_spec_match ;;
     decision-path) cmd_decision_path "$@" ;;
     index) cmd_index ;;
