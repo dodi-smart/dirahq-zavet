@@ -7,6 +7,7 @@
 #        sh test/sync-check.sh --write    # regenerate MANIFEST
 set -u
 
+# shellcheck disable=SC1007
 dir=$(CDPATH= cd -- "$(dirname -- "$0")/fixtures/dialect" && pwd) || exit 1
 cd -- "$dir" || exit 1
 
