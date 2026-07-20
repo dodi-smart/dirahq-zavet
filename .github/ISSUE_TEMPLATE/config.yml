@@ -1,0 +1,10 @@
+blank_issues_enabled: true
+contact_links:
+  - name: dira (the CLI / daemon) issue
+    url: https://github.com/dodi-smart/dirahq-cli/issues/new/choose
+    about: >-
+      zavet is the knowledge-layer plugin. Issues with dira itself — the dira/dirad
+      binaries, time tracking, install/update, the daemon — belong in dirahq-cli, not here.
+  - name: Security vulnerability
+    url: https://github.com/dodi-smart/dirahq-zavet/security/advisories/new
+    about: Please report privately via GitHub Security Advisories — see SECURITY.md.
