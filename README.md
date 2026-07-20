@@ -41,12 +41,40 @@ Everything is plain markdown + git. No daemon, no cloud, no lock-in: the
 
 ## Install
 
-As a Claude Code plugin:
+Zavet is a Claude Code plugin, installed from this repo's marketplace
+manifest (`.claude-plugin/marketplace.json`). Pick whichever of these three
+paths fits how you work — they all end at the same installed plugin.
+
+**Interactive (Claude Code REPL):**
 
 ```
 /plugin marketplace add dodi-smart/dirahq-zavet
 /plugin install zavet@dirahq
 ```
+
+**Scriptable (CI, dotfiles, bootstrap scripts)** — the `claude` CLI exposes
+the same two steps outside the REPL:
+
+```sh
+claude plugin marketplace add dodi-smart/dirahq-zavet && \
+  claude plugin install zavet@dirahq
+```
+
+**From dira** — if you already run dira, one command does both steps:
+
+```sh
+dira zavet install
+```
+
+It shells out to the same `claude plugin` calls above rather than
+hand-writing plugin state, detects an existing install and no-ops (pass
+`--update` to refresh), and prints an advisory line if this dira build is
+older than the `min_dira` below. `--dry-run` shows the exact `claude`
+invocations without running them.
+
+Every install path takes an optional `--scope <user|project|local>` (default
+`user`); see `claude plugin install --help`. **Claude Code must be restarted
+after install** for the plugin's commands and hooks to become active.
 
 Then, in a repo you want to track:
 
@@ -69,10 +97,11 @@ silently no-op without it). `dira` is optional.
 | `/zavet:spec` | Living feature specs. Bare = *document* this session's work (normally happens transparently, no command needed); `design <feature>` = spec before code; `backfill <feature>` = reconstruct from existing code under the honesty rules |
 | `/zavet:audit` | Report-only knowledge health sweep — code-vs-decision conflicts, stale specs, over-broad guards. Judges nothing it didn't open; changes nothing |
 
-The `bin/zavet` helper is also usable directly (and from CI):
-`init · list · guards · match <path> · match-batch · specs · spec-paths ·
-spec-match · check <range> · audit · next-id · decision-path <id> · index ·
-emit`.
+The `bin/zavet` helper is also usable directly (and from CI) — run
+`bin/zavet help` for the full usage text:
+`init · root · next-id · list · guards · match <path> · match-batch ·
+decision-path <id> · specs · spec-paths · spec-match · check <range> ·
+audit · index · deny <reason> · emit <kind> <id> [file] · version [--json]`.
 
 ## CI enforcement
 
@@ -128,6 +157,53 @@ What the hooks send to `dira zavet emit` on stdin:
 unknown kinds are stored verbatim. The daemon resolves the repo from `cwd` and
 never trusts a caller-supplied repo identity. Delivery is best-effort: a
 missing daemon, an older dira, or a dropped event must never affect the hooks.
+
+## Integration contract (stable)
+
+`dira zavet install` (see [Install](#install)) and every other point of
+contact between this plugin and dira depend on four things staying stable.
+Changing any of them is a breaking change requiring a coordinated dirahq-cli
+release, not a same-day fix:
+
+1. **Identity** — marketplace `dirahq` + plugin `zavet` ⇒ install id
+   `zavet@dirahq`.
+2. **Location** — repo slug `dodi-smart/dirahq-zavet`, marketplace manifest
+   at `.claude-plugin/marketplace.json`, default branch `main` (the
+   marketplace source records no `ref`, so installs always clone the
+   default branch — see [Releases](#releases--versioning)).
+3. **Executable surface** — `bin/zavet` at the plugin root, supporting
+   `version` and `version --json` (see [Version compatibility](#version-compatibility)).
+4. **Wire format** — the guard-event schema on stdin of `dira zavet emit` is
+   `v: 1` (see [Guard event schema](#guard-event-schema-v1) above).
+
+## Version compatibility
+
+`zavet version --json` is the machine-readable half of that contract:
+
+```json
+{"v":1,"plugin":"zavet","version":"0.1.0","emit_schema":1,"min_dira":"0.1.0"}
+```
+
+| Field | Meaning |
+|---|---|
+| `v` | Contract format version of this JSON blob itself (not the guard-event schema). |
+| `plugin` | Always `"zavet"`. |
+| `version` | The plugin's own version, read from `.claude-plugin/plugin.json`. |
+| `emit_schema` | The guard-event schema version this build of `bin/zavet` emits (currently `1`). |
+| `min_dira` | **Advisory only** — see below. |
+
+**Posture: surface skew, never gate on it.** The whole premise of this
+plugin is that each half of the dira + zavet pair works fully without the
+other, so neither half is allowed to refuse to talk to the other over a
+version mismatch. `zavet emit` stays fire-and-forget and unconditional
+regardless of what `dira zavet version` reports. A plugin newer than the
+installed dira already degrades correctly today: dira stores unknown guard
+event `kind`s verbatim and filters at query time rather than rejecting them
+(`dirahq-cli`'s [`docs/zavet.md:48-49`](https://github.com/dodi-smart/dirahq-cli/blob/develop/docs/zavet.md)).
+dira is expected to keep accepting `v: 1` indefinitely. There is no
+minimum-dira gate anywhere in this plugin, and there will not be one —
+`min_dira` exists for humans and dashboards to read, never for `bin/zavet`
+or the hooks to act on.
 
 ## Decision record format
 
@@ -193,6 +269,19 @@ living doc carries the pointers. With dira installed, commits touching a
 spec's `paths` after its last update mark it **stale** in `dira zavet wiki`,
 and `dira zavet why` resolves free-text questions against specs and decisions
 together.
+
+## Releases & versioning
+
+`main` is the single release channel — there is no `develop` prerelease
+branch here, because the marketplace source in `known_marketplaces.json`
+records no `ref` and always installs the default branch, so a second
+channel would simply be invisible to every install. Releases are cut by
+[semantic-release](https://semantic-release.gitbook.io/) from Conventional
+Commit history on `main`; tags are `v${version}`. The version of record is the
+`"version"` key in [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json),
+bumped automatically by `scripts/set-version.sh` as part of each release.
+**Do not hand-edit that version** — a manually bumped `plugin.json` and the
+next automated release will disagree.
 
 ## License
 
