@@ -34,10 +34,78 @@ jobs:
       - uses: actions/checkout@v4
       - name: vendored fixtures match MANIFEST
         run: sh test/sync-check.sh
-      # Soft until the dirahq-cli companion (canonical fixtures) merges to
-      # develop; flip continue-on-error off afterwards.
+      # Targets dirahq-cli's `develop`, not `main` — on purpose, not by
+      # mistake. zavet has one release channel (`main`, see CONTRIBUTING.md),
+      # so whatever lands here next ships to every user as soon as it's
+      # merged. Pinning the comparison to dira's `main` would only catch
+      # drift a release late: dira's dialect changes land on `develop` first
+      # and reach `main` only when dira itself cuts a release, by which time
+      # a zavet change built against the stale `main` copy would already be
+      # wrong. Comparing against `develop` catches drift against the dialect
+      # the *next* dira ships, which is the one that matters here.
+      # Fetch failure and drift are different failures and are treated
+      # differently. dirahq-cli is private until launch, so an anonymous raw
+      # fetch 404s; that is an access problem, not evidence the dialects have
+      # diverged, and failing the build on it would train everyone to ignore
+      # this job. So: if the canonical copy cannot be read, warn and skip. If
+      # it CAN be read, a diff is a hard failure.
+      # Once dirahq-cli is public the fetch always succeeds and the skip path
+      # becomes unreachable — at which point it can be deleted.
       - name: canonical MANIFEST in dirahq-cli matches
-        continue-on-error: true
+        env:
+          # Optional: lets the check run for real while dirahq-cli is private.
+          # Needs a token with contents:read on dodi-smart/dirahq-cli.
+          CANONICAL_TOKEN: ${{ secrets.DIRAHQ_CLI_READ_TOKEN }}
+          CANONICAL_URL: https://api.github.com/repos/dodi-smart/dirahq-cli/contents/cli/core/testdata/zavet-dialect/MANIFEST?ref=develop
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/dodi-smart/dirahq-cli/develop/cli/core/testdata/zavet-dialect/MANIFEST" -o "$RUNNER_TEMP/canonical-manifest"
-          diff -u "$RUNNER_TEMP/canonical-manifest" test/fixtures/dialect/MANIFEST
+          set -u
+          out="$RUNNER_TEMP/canonical-manifest"
+          if [ -n "${CANONICAL_TOKEN:-}" ]; then
+            auth="Authorization: Bearer $CANONICAL_TOKEN"
+          else
+            auth="X-No-Auth: 1"
+          fi
+          if curl -fsSL -H "$auth" -H "Accept: application/vnd.github.raw" \
+                 -H "X-GitHub-Api-Version: 2022-11-28" "$CANONICAL_URL" -o "$out"; then
+            echo "canonical MANIFEST fetched; diffing"
+            diff -u "$out" test/fixtures/dialect/MANIFEST
+          else
+            echo "::warning title=fixture-sync skipped::Could not read the canonical MANIFEST from dodi-smart/dirahq-cli@develop (private repo, or DIRAHQ_CLI_READ_TOKEN unset). Cross-repo dialect drift was NOT verified."
+          fi
+
+  # --- Decision: no `claude plugin validate` job here -----------------------
+  # Running the real `claude plugin validate . --strict` in CI would mean
+  # installing (and, for a meaningful run, authenticating) the `claude` CLI
+  # on every runner, for every push and PR, just to catch the two things that
+  # actually go wrong in practice: a manifest that doesn't parse, and
+  # `plugin.json`'s version drifting from the tag `claude plugin tag` cuts at
+  # release time. That's a lot of pipeline weight (and a new external
+  # dependency, credentials included) for what `manifest-check` below covers
+  # for the price of `jq`. Full `--strict` validation stays a local,
+  # pre-tag check (see CONTRIBUTING.md) — cheap to run by hand, not worth
+  # running on every commit.
+  manifest-check:
+    name: plugin manifest sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need full history + tags for the version check below
+      - name: manifests parse as JSON
+        run: |
+          jq empty .claude-plugin/plugin.json
+          jq empty .claude-plugin/marketplace.json
+      - name: plugin.json version matches the latest v* tag reachable from HEAD (if any)
+        run: |
+          tag=$(git tag --list 'v*' --merged HEAD | sort -V | tail -1)
+          if [ -z "$tag" ]; then
+            echo "no v* tag reachable from HEAD yet (pre-first-release) — skipping"
+            exit 0
+          fi
+          tag_version=${tag#v}
+          manifest_version=$(jq -r .version .claude-plugin/plugin.json)
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "plugin.json version ($manifest_version) does not match latest tag $tag ($tag_version)" >&2
+            exit 1
+          fi
+          echo "plugin.json version $manifest_version matches $tag"
