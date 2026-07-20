@@ -1,0 +1,42 @@
+## 1.0.0 (2026-07-20)
+
+### ✨ Features
+
+* **plugin:** /zavet:audit — report-only knowledge health sweep ([7571e66](https://github.com/dodi-smart/dirahq-zavet/commit/7571e662c5bc054d73b00289ff456126fb5518f5))
+* **plugin:** /zavet:backfill — reverse-engineer existing codebases into unverified records ([a83fd5f](https://github.com/dodi-smart/dirahq-zavet/commit/a83fd5f81237616fd8ac07dc03d248722a0cddae))
+* **plugin:** /zavet:wiki browse command; /zavet:why leans on dira's free-text search when present ([883ce7b](https://github.com/dodi-smart/dirahq-zavet/commit/883ce7b52034071d5ae778847ef02064040991ed))
+* **plugin:** add a version subcommand and the version --json contract ([fcd2a88](https://github.com/dodi-smart/dirahq-zavet/commit/fcd2a88ba57941875401b22c519c600843eff41e))
+* **plugin:** living specs — transparent document flow, /zavet:spec, spec-currency nudge ([80b4ffb](https://github.com/dodi-smart/dirahq-zavet/commit/80b4ffb78946ba3c59d121f3e613069234973045)), closes [dodi-smart/dirahq-zavet#2](https://github.com/dodi-smart/dirahq-zavet/issues/2)
+* **plugin:** zavet audit plumbing — stale specs, stale decisions, guard pressure ([dd7c928](https://github.com/dodi-smart/dirahq-zavet/commit/dd7c928175785afd1babbc5283d3e8399a4bb594))
+* **plugin:** zavet check — CI trailer floor over a commit range ([1473ddd](https://github.com/dodi-smart/dirahq-zavet/commit/1473ddd15ebb85fc697ca8f1133eca53895fd250))
+* **plugin:** zavet knowledge-layer plugin — guard hooks, commands, skill, templates, zavet helper ([d25fcc0](https://github.com/dodi-smart/dirahq-zavet/commit/d25fcc04fe941cb50a628d12a9ae5f559ba2d20f))
+* **release:** automate releases with semantic-release ([2fca0e3](https://github.com/dodi-smart/dirahq-zavet/commit/2fca0e3fd0e8eedb0dccff5fe9a28e1a8913e890))
+
+### 🐛 Bug Fixes
+
+* **plugin:** align block-list edge semantics with the Rust reference dialect ([4f8b2bd](https://github.com/dodi-smart/dirahq-zavet/commit/4f8b2bd013866c6a49fd4f5cd7ad96c44f03b964))
+* **plugin:** expose spec-paths in dispatch and usage ([e63bdf8](https://github.com/dodi-smart/dirahq-zavet/commit/e63bdf8d40afff8f0e5207e6c272ee5f5bc5148d))
+* **plugin:** scaffold the decision template outside decisions/ ([3b25e54](https://github.com/dodi-smart/dirahq-zavet/commit/3b25e54e4e76f53f45d60ab49989fadeb509e324))
+
+### ⚡ Performance Improvements
+
+* **plugin:** single-pass guards parsing, batch path matching, shared deny/root helpers ([4b5436a](https://github.com/dodi-smart/dirahq-zavet/commit/4b5436a5e4e3248aaf5687242c81926c2d9ea15c))
+
+### 📚 Documentation
+
+* **repo:** document install, the dira contract, and going public ([b05e15b](https://github.com/dodi-smart/dirahq-zavet/commit/b05e15b1ab428478167b7fbc251e5e7d839aed1b))
+
+### ♻️ Code Refactoring
+
+* **plugin:** factor glob normalization out of run_match ([1fb6411](https://github.com/dodi-smart/dirahq-zavet/commit/1fb64112b1660fe67b20a36fb055d396ad18e528))
+* **plugin:** one commit hook, parser parity with dira, leaner spec listing ([e5a00f3](https://github.com/dodi-smart/dirahq-zavet/commit/e5a00f30202d2e1eef0096bcfdd152080045a103)), closes [dodi-smart/dirahq-zavet#2](https://github.com/dodi-smart/dirahq-zavet/issues/2)
+
+### ✅ Tests
+
+* **plugin:** frontmatter dialect goldens + POSIX test runner ([9b54741](https://github.com/dodi-smart/dirahq-zavet/commit/9b5474168227b634018b1d6bd6d7210c8b6847ba))
+
+### 👷 Continuous Integration
+
+* **plugin:** appease newer shellcheck — single gc helper, SC2015 disables at guard idioms ([080d8b9](https://github.com/dodi-smart/dirahq-zavet/commit/080d8b9ac9bfa84eeec9cbb5b3fd14318f6f51bb))
+* **plugin:** GitHub Actions — sh tests on ubuntu+macos, shellcheck, fixture sync guard ([2a220cb](https://github.com/dodi-smart/dirahq-zavet/commit/2a220cb979b7843b5b8c85d22ab4dc4844071af4))
+* **plugin:** harden CI and make fixture-sync tell drift from unavailability ([4dc61e3](https://github.com/dodi-smart/dirahq-zavet/commit/4dc61e3c7285729e04ca5891ebbbbdafa92c9f2a))
