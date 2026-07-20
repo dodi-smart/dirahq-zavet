@@ -1,9 +1,11 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "dirahq",
   "owner": {
     "name": "DODI SMART OOD",
     "url": "https://github.com/dodi-smart"
   },
+  "description": "DODI SMART's Claude Code plugin marketplace — currently zavet, the repo-local knowledge layer for AI-assisted development.",
   "plugins": [
     {
       "name": "zavet",
