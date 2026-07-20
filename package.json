@@ -1,0 +1,23 @@
+{
+  "name": "dirahq-zavet-release",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Release & commit-convention tooling for the Dira Zavet plugin.",
+  "scripts": {
+    "release": "semantic-release --extends ./.releaserc.js",
+    "release:dry-run": "semantic-release --dry-run --no-ci --extends ./.releaserc.js",
+    "commitlint": "commitlint"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "21.2.1",
+    "@commitlint/config-conventional": "21.2.0",
+    "@semantic-release/changelog": "6.0.3",
+    "@semantic-release/commit-analyzer": "13.0.1",
+    "@semantic-release/exec": "7.1.0",
+    "@semantic-release/git": "10.0.1",
+    "@semantic-release/github": "12.0.9",
+    "@semantic-release/release-notes-generator": "14.1.1",
+    "conventional-changelog-conventionalcommits": "9.3.1",
+    "semantic-release": "25.0.6"
+  }
+}

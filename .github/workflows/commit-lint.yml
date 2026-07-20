@@ -1,0 +1,25 @@
+name: Commit Lint
+
+# Kept in its own workflow file (not folded into ci.yml) so this task's scope
+# never touches ci.yml, which is owned elsewhere.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: commit-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  commit-lint:
+    name: Commit Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: wagoid/commitlint-github-action@v6
+        with:
+          configFile: commitlint.config.mjs
