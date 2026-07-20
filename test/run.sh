@@ -213,6 +213,68 @@ stale-decision	D-0001	1
 guard-pressure	D-0001	src/**" "$(printf '%s\n' "$out" | cut -f1-3)"
 assert_eq "guard-pressure counts files" "guard-pressure	D-0001	src/**	2	5" "$(printf '%s\n' "$out" | grep '^guard-pressure')"
 
+# -------------------------------------------------------------- version --
+# `zavet version` needs no .zavet/ and no git repo — it only depends on
+# script_dir() finding ../.claude-plugin/plugin.json relative to $0. That
+# helper (line ~57) was, until now, exercised only incidentally by
+# cmd_init's `../templates` lookup and never asserted on directly. Build a
+# throwaway plugin skeleton so the manifest version is a known literal,
+# independent of whatever the real repo's plugin.json currently says.
+printf -- '-- version\n'
+R="$TMP/version"
+mkdir -p "$R/plugin/bin" "$R/plugin/.claude-plugin"
+cp "$Z" "$R/plugin/bin/zavet"
+cat >"$R/plugin/.claude-plugin/plugin.json" <<'EOF'
+{
+  "name": "zavet",
+  "version": "9.9.9-test",
+  "description": "fixture manifest for the version-contract tests"
+}
+EOF
+json_expected='{"v":1,"plugin":"zavet","version":"9.9.9-test","emit_schema":1,"min_dira":"0.1.0"}'
+
+assert_eq "version: bare, direct invocation" "9.9.9-test" "$(sh "$R/plugin/bin/zavet" version)"
+assert_eq "version: --json, direct invocation" "$json_expected" "$(sh "$R/plugin/bin/zavet" version --json)"
+line_count=$(sh "$R/plugin/bin/zavet" version --json | wc -l)
+line_count=$((line_count + 0))
+assert_eq "version --json is a single line" "1" "$line_count"
+
+# Ancestor-directory symlink — the realistic shape of a plugin reached
+# through a stable alias (Claude's plugin cache is versioned;
+# ~/.claude/plugins/cache/<marketplace>/zavet/<version>/ is exactly the
+# kind of path a convenience symlink would point at). $0's dirname then
+# runs THROUGH the symlink rather than resolving it, and "../.claude-plugin"
+# still lands on the right manifest because intermediate path components
+# are followed transparently by the OS — script_dir() never chases the
+# link itself, so this is the property that actually needs proving.
+ln -s "$R/plugin" "$R/plugin-current"
+assert_eq "version: bare, via symlinked plugin dir" "9.9.9-test" "$(sh "$R/plugin-current/bin/zavet" version)"
+assert_eq "version: --json, via symlinked plugin dir" "$json_expected" "$(sh "$R/plugin-current/bin/zavet" version --json)"
+
+# Arbitrary cwd — script_dir() resolves off $0, never off the caller's
+# working directory (a `cd /` proves no accidental reliance on PWD).
+assert_eq "version: bare, arbitrary cwd, absolute path" "9.9.9-test" "$(cd / && sh "$R/plugin/bin/zavet" version)"
+assert_eq "version: --json, arbitrary cwd, via symlink" "$json_expected" "$(cd / && sh "$R/plugin-current/bin/zavet" version --json)"
+
+# A missing or unreadable manifest must never fail the command.
+R2="$TMP/version-missing"
+mkdir -p "$R2/plugin/bin"
+cp "$Z" "$R2/plugin/bin/zavet"
+out=$(sh "$R2/plugin/bin/zavet" version)
+rc=$?
+assert_eq "version: missing manifest exits 0" "0" "$rc"
+assert_eq "version: missing manifest prints unknown" "unknown" "$out"
+out=$(sh "$R2/plugin/bin/zavet" version --json)
+rc=$?
+assert_eq "version --json: missing manifest exits 0" "0" "$rc"
+assert_eq "version --json: missing manifest embeds unknown" \
+    '{"v":1,"plugin":"zavet","version":"unknown","emit_schema":1,"min_dira":"0.1.0"}' "$out"
+
+# Byte-for-byte against the REAL shipped manifest, through the real $Z —
+# the actual contract dira-side installers will read.
+real_version=$(sed -n 's/^[[:space:]]*"version": *"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -n1)
+assert_eq "version: matches real plugin.json byte-for-byte" "$real_version" "$(sh "$Z" version)"
+
 # ---------------------------------------------------------------- summary --
 if [ "$fails" -gt 0 ]; then
     printf '%s test(s) FAILED\n' "$fails"
