@@ -10,6 +10,11 @@ MARK_START="<!-- zavet:decisions:start -->"
 MARK_END="<!-- zavet:decisions:end -->"
 MARK_SPECS_START="<!-- zavet:specs:start -->"
 MARK_SPECS_END="<!-- zavet:specs:end -->"
+# The `zavet version --json` contract — bump ZAVET_EMIT_SCHEMA when the
+# `emit` payload shape changes; ZAVET_MIN_DIRA is advisory only (see
+# cmd_version — dira never gates on it, it only surfaces skew).
+ZAVET_EMIT_SCHEMA=1
+ZAVET_MIN_DIRA="0.1.0"
 
 usage() {
     cat <<'EOF'
@@ -40,6 +45,7 @@ Usage:
   zavet deny <reason>         Print a PreToolUse permission-deny JSON (for hooks)
   zavet emit <kind> <id> [file]
                               Fire a guard event to dira (silent no-op without dira)
+  zavet version [--json]      Print the plugin version (bare, or as a JSON contract)
 EOF
 }
 
@@ -51,6 +57,22 @@ die() {
 script_dir() {
     # shellcheck disable=SC1007
     CDPATH= cd -- "$(dirname -- "$0")" && pwd
+}
+
+# Read the "version" field out of the plugin manifest via sed/awk only — jq
+# is a soft dependency of the hooks (see header), never of this script.
+# Never fails: prints "unknown" for a missing or unparseable manifest.
+plugin_version() {
+    manifest="$(script_dir)/../.claude-plugin/plugin.json"
+    [ -f "$manifest" ] || { printf 'unknown\n'; return 0; }
+    v=$(awk -F'"' '
+        /^[ \t]*"version"[ \t]*:/ { print $4; exit }
+    ' "$manifest" 2>/dev/null)
+    if [ -n "$v" ]; then
+        printf '%s\n' "$v"
+    else
+        printf 'unknown\n'
+    fi
 }
 
 repo_toplevel() {
@@ -641,6 +663,21 @@ cmd_emit() {
     return 0
 }
 
+# The version contract `dira zavet install` reads to report plugin version
+# and (advisory only, never gating — see ZAVET_MIN_DIRA above) surface
+# skew. Bare form for humans/scripts, --json for machine consumers.
+cmd_version() {
+    v=$(plugin_version)
+    case "${1:-}" in
+        --json)
+            printf '{"v":1,"plugin":"zavet","version":"%s","emit_schema":%s,"min_dira":"%s"}\n' \
+                "$(json_escape "$v")" "$ZAVET_EMIT_SCHEMA" "$(json_escape "$ZAVET_MIN_DIRA")"
+            ;;
+        "") printf '%s\n' "$v" ;;
+        *) die "usage: zavet version [--json]" ;;
+    esac
+}
+
 [ $# -ge 1 ] || { usage; exit 1; }
 cmd=$1
 shift
@@ -661,6 +698,7 @@ case "$cmd" in
     index) cmd_index ;;
     deny) cmd_deny "$@" ;;
     emit) cmd_emit "$@" ;;
+    version | --version | -V) cmd_version "$@" ;;
     help | -h | --help) usage ;;
     *)
         usage
