@@ -43,35 +43,31 @@ jobs:
       # a zavet change built against the stale `main` copy would already be
       # wrong. Comparing against `develop` catches drift against the dialect
       # the *next* dira ships, which is the one that matters here.
-      # Fetch failure and drift are different failures and are treated
-      # differently. dirahq-cli is private until launch, so an anonymous raw
-      # fetch 404s; that is an access problem, not evidence the dialects have
-      # diverged, and failing the build on it would train everyone to ignore
-      # this job. So: if the canonical copy cannot be read, warn and skip. If
-      # it CAN be read, a diff is a hard failure.
-      # Once dirahq-cli is public the fetch always succeeds and the skip path
-      # becomes unreachable — at which point it can be deleted.
+      # dirahq-cli is public as of 2026-07-28, so the anonymous fetch always
+      # succeeds and both a fetch failure and a diff are now hard failures.
+      # This used to warn-and-skip when the copy could not be read, because a
+      # 404 against a private repo was an access problem rather than evidence
+      # of drift — and a job that fails for reasons nobody can act on is a job
+      # everybody learns to ignore. That reasoning is spent: an unreachable
+      # canonical copy is now itself a real signal (the path moved, the branch
+      # was renamed, the repo went private again), so it should stop the build
+      # rather than print a warning nobody reads.
+      #
+      # Unauthenticated GitHub API calls are rate-limited to 60/hr per IP, which
+      # is shared across the runner's egress. If this starts flaking on rate
+      # limits rather than drift, add an Authorization header using the
+      # workflow's own GITHUB_TOKEN — not a cross-repo PAT; the resource is
+      # public now and needs no special grant.
       - name: canonical MANIFEST in dirahq-cli matches
         env:
-          # Optional: lets the check run for real while dirahq-cli is private.
-          # Needs a token with contents:read on dodi-smart/dirahq-cli.
-          CANONICAL_TOKEN: ${{ secrets.DIRAHQ_CLI_READ_TOKEN }}
           CANONICAL_URL: https://api.github.com/repos/dodi-smart/dirahq-cli/contents/cli/core/testdata/zavet-dialect/MANIFEST?ref=develop
         run: |
-          set -u
+          set -eu
           out="$RUNNER_TEMP/canonical-manifest"
-          if [ -n "${CANONICAL_TOKEN:-}" ]; then
-            auth="Authorization: Bearer $CANONICAL_TOKEN"
-          else
-            auth="X-No-Auth: 1"
-          fi
-          if curl -fsSL -H "$auth" -H "Accept: application/vnd.github.raw" \
-                 -H "X-GitHub-Api-Version: 2022-11-28" "$CANONICAL_URL" -o "$out"; then
-            echo "canonical MANIFEST fetched; diffing"
-            diff -u "$out" test/fixtures/dialect/MANIFEST
-          else
-            echo "::warning title=fixture-sync skipped::Could not read the canonical MANIFEST from dodi-smart/dirahq-cli@develop (private repo, or DIRAHQ_CLI_READ_TOKEN unset). Cross-repo dialect drift was NOT verified."
-          fi
+          curl -fsSL -H "Accept: application/vnd.github.raw" \
+               -H "X-GitHub-Api-Version: 2022-11-28" "$CANONICAL_URL" -o "$out"
+          echo "canonical MANIFEST fetched; diffing"
+          diff -u "$out" test/fixtures/dialect/MANIFEST
 
   # --- Decision: no `claude plugin validate` job here -----------------------
   # Running the real `claude plugin validate . --strict` in CI would mean
