@@ -1,3 +1,17 @@
 .DS_Store
 *.tmp.*
 node_modules/
+
+# Defence in depth. Nothing secret has ever been tracked here and the plugin
+# needs no credentials to run, but this repo takes outside patches — these
+# patterns are the difference between a contributor's stray local file being
+# ignored and it riding along in a `git add -A`.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*.p12
+credentials*.json

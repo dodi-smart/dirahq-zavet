@@ -1,6 +1,6 @@
 // Release config for the Zavet plugin. Single-channel: `main` is the only
-// release branch (see CLAUDE.md / plan C1 — the marketplace source has no
-// `ref`, so a `develop` prerelease channel would be invisible to installs).
+// release branch (see CONTRIBUTING.md — the marketplace source has no `ref`,
+// so a `develop` prerelease channel would be invisible to installs).
 // The version source of truth is the `"version"` key in
 // `.claude-plugin/plugin.json`; `scripts/set-version.sh` bumps it in place.
 // Tags are `v${version}`. Note this is deliberately NOT the format

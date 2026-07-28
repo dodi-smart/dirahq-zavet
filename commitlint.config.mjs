@@ -2,8 +2,8 @@
 // can express a function-based `ignores`).
 //
 // Conventional Commits, enforced by the `commit-lint` CI job. The rules mirror
-// the documented policy in CLAUDE.md: a fixed type list, a mandatory scope from
-// the release-mapped set, and ≤180-char lines.
+// the documented policy in CONTRIBUTING.md: a fixed type list, a mandatory
+// scope from the release-mapped set, and ≤180-char lines.
 //
 // `ignores` exempts integration *merge* commits whose subject uses a
 // `merge(<scope>): …` prefix. Commitlint's built-in `defaultIgnores` only skips

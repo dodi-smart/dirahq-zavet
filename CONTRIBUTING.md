@@ -9,6 +9,13 @@ reason for two different contribution bars across two halves of one product. The
 that do exist follow from this being a plugin (POSIX `sh`, single release channel) rather
 than a set of Rust binaries, and are called out explicitly below.
 
+By participating, you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).
+
+**Found a security issue?** Don't open a public issue — see [SECURITY.md](SECURITY.md) for
+private reporting. Note the bar is lower than usual here: these hooks run shell scripts on
+every `Edit`/`Write`/`Bash` tool call in a user's session, so anything that widens that
+surface is worth reporting even if you can't demonstrate an exploit.
+
 ## Developer Certificate of Origin (DCO)
 
 We use the [Developer Certificate of Origin](https://developercertificate.org/). By signing
