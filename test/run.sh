@@ -9,6 +9,8 @@
 #   matcher — run_match glob semantics (** collapse, trailing /, dedup)
 #   check   — the CI trailer floor over real commit ranges
 #   audit   — staleness + guard-pressure sweeps over real history
+#   verify  — running recorded checks (the one command that executes repo
+#             content), plus section extraction and the guard-injection budget
 set -u
 
 # shellcheck disable=SC1007
@@ -68,6 +70,13 @@ cp "$FIX/specs/.hidden-template.md" "$R/.zavet/specs/"
 (cd "$R" && sh "$Z" guards) >"$TMP/a.dg" && assert_file "decisions-guards" "$FIX/expected/decisions-guards.tsv" "$TMP/a.dg"
 (cd "$R" && sh "$Z" specs) >"$TMP/a.sm" && assert_file "specs-meta" "$FIX/expected/specs-meta.tsv" "$TMP/a.sm"
 (cd "$R" && sh "$Z" spec-paths) >"$TMP/a.sp" && assert_file "spec-paths" "$FIX/expected/spec-paths.tsv" "$TMP/a.sp"
+(cd "$R" && sh "$Z" checks) >"$TMP/a.dc" && assert_file "decision-checks" "$FIX/expected/decision-checks.tsv" "$TMP/a.dc"
+(cd "$R" && sh "$Z" spec-checks) >"$TMP/a.sc" && assert_file "spec-checks" "$FIX/expected/spec-checks.tsv" "$TMP/a.sc"
+# No golden for errata: id canonicalization is a documented Rust-only extra,
+# so the two sides deliberately disagree here (D-0015 carries `D-7`).
+(cd "$R" && sh "$Z" errata) >"$TMP/a.er"
+assert_eq "errata reports the pointer verbatim" "D-0015	D-7
+D-0017	D-9999" "$(cat "$TMP/a.er")"
 
 # ---------------------------------------------------------------- matcher --
 printf -- '-- matcher\n'
@@ -274,6 +283,105 @@ assert_eq "version --json: missing manifest embeds unknown" \
 # the actual contract dira-side installers will read.
 real_version=$(sed -n 's/^[[:space:]]*"version": *"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -n1)
 assert_eq "version: matches real plugin.json byte-for-byte" "$real_version" "$(sh "$Z" version)"
+
+# ----------------------------------------------------------------- verify --
+printf -- '-- verify\n'
+R="$TMP/verify"
+new_repo "$R"
+mkdir -p "$R/src"
+cat >"$R/.zavet/decisions/D-0001-passing.md" <<'EOF'
+---
+id: D-0001
+title: Checks that pass
+status: active
+guards:
+  - src/**
+checks:
+  - tree has src :: test -d src
+  - "quoted keeps a hash :: test -n 'a # b'"
+---
+
+## Decision
+x
+
+## Agent directives
+- Never do the thing.
+- Nor the other thing.
+EOF
+cat >"$R/.zavet/decisions/D-0002-failing.md" <<'EOF'
+---
+id: D-0002
+title: A check that fails
+status: superseded
+checks:
+  - absent file :: test -f definitely-not-here
+---
+body
+EOF
+cat >"$R/.zavet/specs/flows.md" <<'EOF'
+---
+title: Flows
+origin: session
+confidence: high
+date: 2026-01-01
+paths: [src/**]
+checks:
+  - flow still runs :: true
+---
+body
+EOF
+
+# Checks emit for EVERY status — D-0002 is superseded and still listed.
+assert_eq "checks list every status" "D-0001	tree has src	test -d src
+D-0001	quoted keeps a hash	test -n 'a # b'
+D-0002	absent file	test -f definitely-not-here" "$( (cd "$R" && sh "$Z" checks) )"
+
+out=$( (cd "$R" && sh "$Z" verify 2>/dev/null) ); rc=$?
+assert_eq "verify exit 1 when a check fails" "1" "$rc"
+assert_eq "verify reports PASS and FAIL rows" "FAIL	D-0002	absent file
+PASS	D-0001	quoted keeps a hash
+PASS	D-0001	tree has src
+PASS	flows	flow still runs" "$(printf '%s\n' "$out" | sort)"
+
+out=$( (cd "$R" && sh "$Z" verify --id D-0001 2>/dev/null) ); rc=$?
+assert_eq "verify --id selects one decision" "0" "$rc"
+assert_eq "verify --id runs only its checks" "2" "$(printf '%s\n' "$out" | grep -c .)"
+
+out=$( (cd "$R" && sh "$Z" verify --spec flows 2>/dev/null) ); rc=$?
+assert_eq "verify --spec selects one spec" "PASS	flows	flow still runs" "$out"
+
+# --paths resolves through the SAME tables the hooks use.
+out=$( (cd "$R" && sh "$Z" verify --paths src/a.ts 2>/dev/null) )
+assert_eq "verify --paths covers guard and spec matches" "3" "$(printf '%s\n' "$out" | grep -c .)"
+
+out=$( (cd "$R" && sh "$Z" verify --grep quoted 2>/dev/null) )
+assert_eq "verify --grep filters by label" "PASS	D-0001	quoted keeps a hash" "$out"
+
+out=$( (cd "$R" && sh "$Z" verify --id D-9999 2>/dev/null) ); rc=$?
+assert_eq "verify with no match exits 0" "0" "$rc"
+assert_eq "verify with no match prints nothing" "" "$out"
+
+assert_eq "section extracts one body section" "- Never do the thing.
+- Nor the other thing." "$( (cd "$R" && sh "$Z" section D-0001 'Agent directives') )"
+assert_eq "section of an absent heading is empty" "" "$( (cd "$R" && sh "$Z" section D-0001 'Nope') )"
+
+# A dangling corrected-by fails the CI floor.
+cat >"$R/.zavet/decisions/D-0003-dangling.md" <<'EOF'
+---
+id: D-0003
+title: Points at nothing
+status: active
+corrected-by: D-4242
+---
+body
+EOF
+# An EMPTY range, so the only thing check can complain about is the pointer.
+gc add -A >/dev/null 2>&1
+gc commit -qm "records" >/dev/null 2>&1
+base=$(gc rev-parse HEAD)
+out=$( (cd "$R" && sh "$Z" check "$base..$base" 2>/dev/null) ); rc=$?
+assert_eq "check fails on a dangling corrected-by" "1" "$rc"
+assert_eq "check names the bad pointer" "violation-errata	D-0003	D-4242" "$(printf '%s\n' "$out" | cut -f1,2,3)"
 
 # ---------------------------------------------------------------- summary --
 if [ "$fails" -gt 0 ]; then

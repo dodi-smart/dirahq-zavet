@@ -14,9 +14,15 @@ time, agent wall-clock, tokens) that produced it.
 ## What it does
 
 - **Decision records** — append-only `D-NNNN` markdown files in
-  `.zavet/decisions/`, ≤25 lines: decision, why, rejected alternatives, agent
-  directives. Superseding is explicit and tracked; rewriting history is not
-  possible by convention or hook.
+  `.zavet/decisions/`, under 60 lines: decision, why, rejected alternatives,
+  agent directives. Superseding is explicit and tracked; rewriting history is
+  not possible by convention or hook. A record that only needs ONE claim
+  corrected gets `corrected-by: D-MMMM` and stays `active` — every recall path
+  then leads with the correction, instead of the reader hitting the wrong
+  claim first.
+- **Checks** — a record can say *how* its invariants are verified, as
+  `label :: command`. The command is opaque: any runner, any stack, exit 0 is
+  pass, no output is parsed. `zavet verify` runs them; nothing else does.
 - **Guards** — a decision declares path globs over the code it shapes. The
   first time in a session an agent edits a guarded path, the edit is held and
   the decision is shown (*teach before change*); a commit touching guarded
@@ -95,13 +101,15 @@ silently no-op without it). `dira` is optional.
 | `/zavet:wiki` | Browse the knowledge base wiki-style — rules, decisions, glossary, recent rationale |
 | `/zavet:backfill` | Reverse-engineer an existing codebase into decision records — proposed to you first, written as `verified: false` hypotheses with open questions, never invented rationale |
 | `/zavet:spec` | Living feature specs. Bare = *document* this session's work (normally happens transparently, no command needed); `design <feature>` = spec before code; `backfill <feature>` = reconstruct from existing code under the honesty rules |
-| `/zavet:audit` | Report-only knowledge health sweep — code-vs-decision conflicts, stale specs, over-broad guards. Judges nothing it didn't open; changes nothing |
+| `/zavet:audit` | Report-only knowledge health sweep — code-vs-decision conflicts, stale specs, over-broad guards, unverified invariants, over-long records. Judges nothing it didn't open; changes nothing |
+| `/zavet:verify` | Run the checks bound to decisions and specs, and report what is recorded but unchecked. The only command that executes repository content — always explicitly, never from a hook |
 
 The `bin/zavet` helper is also usable directly (and from CI) — run
 `bin/zavet help` for the full usage text:
-`init · root · next-id · list · guards · match <path> · match-batch ·
-decision-path <id> · specs · spec-paths · spec-match · check <range> ·
-audit · index · deny <reason> · emit <kind> <id> [file] · version [--json]`.
+`init · root · next-id · list · guards · checks · errata · match <path> ·
+match-batch · decision-path <id> · section <id> <heading> · specs ·
+spec-paths · spec-checks · spec-match · check <range> · verify · audit ·
+index · deny <reason> · emit <kind> <id> [file] · version [--json]`.
 
 ## CI enforcement
 
@@ -215,6 +223,8 @@ status: active
 guards:
   - cli/dirad/src/capture.rs
   - "cli/core/src/project.rs"
+checks:
+  - capture survives a rebase :: <your runner here>
 origin: recorded        # recorded | reverse-engineered
 verified: true
 ---
@@ -232,8 +242,42 @@ verified: true
 - ...
 ```
 
-Status transitions are append-only: the only permitted mutation is
-`status: superseded` + `superseded-by: D-MMMM`.
+Status transitions are append-only: the only permitted mutations are
+`status: superseded` + `superseded-by: D-MMMM` (the record is REPLACED), and
+`corrected-by: D-MMMM` (one claim inside it is wrong; the record stays
+`active` and its body is untouched). Both are frontmatter-only. `zavet check`
+fails on a `corrected-by` naming a record that does not exist.
+
+### Checks
+
+A check binds an invariant to the command that proves it:
+
+```yaml
+checks:
+  - pg suite forbids module mocks :: <command>   # label :: command
+  - <command>                                    # no separator: command is its own label
+  - "keeps a hash :: <command with a # in it>"   # quote to survive decomment
+```
+
+**Zavet declares the binding; your repo owns the runner.** Nothing here
+detects, infers or special-cases a framework, language or package manager, and
+no output format is implied — *exit 0 is pass* is the entire contract. A
+decision's checks are invariants ("this must never become true again"); a
+spec's are scenarios ("this flow still works").
+
+`zavet verify` is the only thing that runs them, and only when you ask:
+
+```sh
+zavet verify                    # everything
+zavet verify --id D-0042        # one decision
+zavet verify --spec mobile-shell
+zavet verify --paths src/a.ts   # whatever guards/specs cover these paths
+```
+
+Recording an invariant with no check is fine — many genuinely cannot be
+checked. Recording one and saying nothing about verification is not, because
+silence reads as coverage; `zavet audit` reports those as
+`uncovered-invariant`.
 
 **Honesty rule:** knowledge reconstructed from existing code is marked
 `origin: reverse-engineered`, `verified: false`, with open questions instead of

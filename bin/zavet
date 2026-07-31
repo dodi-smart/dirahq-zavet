@@ -33,6 +33,15 @@ Usage:
   zavet decision-path <id>    Print the repo-relative path of a decision file
   zavet specs                 Print TAB-separated: slug, origin, confidence, date, title
   zavet spec-paths            Print TAB-separated: slug, path glob (every spec)
+  zavet checks                Print TAB-separated: id, label, command (every status)
+  zavet spec-checks           Print TAB-separated: slug, label, command
+  zavet errata                Print TAB-separated: id, corrected-by
+  zavet section <id> <head>   Print one "## <head>" section of a decision body
+  zavet verify [--id D-NNNN] [--spec <slug>] [--paths f...] [--grep <substr>]
+                              RUN the checks bound to matching records and
+                              report PASS/FAIL (exit 1 if any failed). Runs
+                              shell commands read from the repo — never wired
+                              into a hook, only an explicit invocation.
   zavet spec-match            Read repo-relative paths (one per line) on stdin,
                               print unique slugs of specs whose paths cover them
   zavet check <rev-range>     CI floor: fail if commits in the range touch
@@ -92,6 +101,10 @@ zavet_root() {
 # change / END (exactly what the old per-file END did).
 #   frontmatter meta   FILE...  -> "id<TAB>status<TAB>title" (one line per file)
 #   frontmatter guards FILE...  -> "id<TAB>glob" (active decisions only)
+#   frontmatter checks FILE...  -> "id<TAB>label<TAB>command" (EVERY status:
+#       a check claims how a record was verified, which stays true after
+#       supersession — unlike a guard, which enforces nothing once superseded)
+#   frontmatter errata FILE...  -> "id<TAB>corrected-by" (only records with one)
 frontmatter() {
     mode=$1
     shift
@@ -104,17 +117,52 @@ frontmatter() {
             if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
             return s
         }
-        function flush() {
+        # Split a check item on its FIRST "::" into _lbl/_cmd. No separator
+        # means the item IS the command and doubles as its own label; only the
+        # first separator splits, so a command keeps any later "::".
+        # Strip ONE matching pair of surrounding quotes, like the Rust
+        # unquote. Deliberately not the independent-gsub form the guard and
+        # path lists use: a command ending in a quote (runner --grep "A::b")
+        # would lose it. sprintf(%c,34/39) keeps the quotes out of the awk
+        # source, which lives inside a single-quoted shell string.
+        function unpair(v,    f, l, dq, sq) {
+            dq = sprintf("%c", 34); sq = sprintf("%c", 39)
+            if (length(v) < 2) return v
+            f = substr(v, 1, 1); l = substr(v, length(v), 1)
+            if (f == l && (f == dq || f == sq)) return substr(v, 2, length(v) - 2)
+            return v
+        }
+        function splitcheck(s,    i) {
+            i = index(s, "::")
+            if (i > 0) { _lbl = substr(s, 1, i - 1); _cmd = substr(s, i + 2) }
+            else { _lbl = s; _cmd = s }
+            gsub(/^[ \t]+/, "", _lbl); gsub(/[ \t]+$/, "", _lbl)
+            gsub(/^[ \t]+/, "", _cmd); gsub(/[ \t]+$/, "", _cmd)
+            if (_lbl == "") _lbl = _cmd
+        }
+        function flush(    i) {
             # `closed` gates emission: an unclosed --- fence is malformed and
             # yields nothing, matching the Rust parser.
             if (id != "" && closed) {
                 if (status == "") status = "active"
                 if (mode == "meta") print id "\t" status "\t" title
-                else if (status == "active")
+                else if (mode == "errata") {
+                    # Verbatim, NOT canonicalized — id canonicalization is a
+                    # documented Rust-only extra (see the fixtures README).
+                    if (correctedby != "") print id "\t" correctedby
+                }
+                else if (mode == "checks") {
+                    for (i = 1; i <= nc; i++) {
+                        splitcheck(checks[i])
+                        # A label with no command verifies nothing.
+                        if (_cmd != "") print id "\t" _lbl "\t" _cmd
+                    }
+                }
+                else if (mode == "guards" && status == "active")
                     for (i = 1; i <= ng; i++) print id "\t" guards[i]
             }
-            id = ""; status = ""; title = ""; ng = 0
-            fm = 0; done = 0; closed = 0; inguards = 0
+            id = ""; status = ""; title = ""; ng = 0; nc = 0; correctedby = ""
+            fm = 0; done = 0; closed = 0; inguards = 0; inchecks = 0
         }
         FNR == 1 { flush(); if ($0 == "---") fm = 1; else done = 1; next }
         done { next }
@@ -134,8 +182,21 @@ frontmatter() {
         }
         inguards && /^[ \t]+[^ \t]/ { next }
         inguards { inguards = 0 }
+        inchecks && /^[ \t]*-[ \t]/ {
+            c = $0; sub(/^[ \t]*-[ \t][ \t]*/, "", c)
+            c = decomment(c)
+            sub(/[ \t]+$/, "", c)
+            c = unpair(c)
+            if (c != "") checks[++nc] = c
+            next
+        }
+        inchecks && /^[ \t]+[^ \t]/ { next }
+        inchecks { inchecks = 0 }
         /^id:/     { s = $0; sub(/^id:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); id = s; next }
         /^status:/ { s = $0; sub(/^status:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); status = s; next }
+        # The errata pointer, reported VERBATIM — id canonicalization is a
+        # documented Rust-only extra (see the fixtures README).
+        /^corrected-by:/ { s = $0; sub(/^corrected-by:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); correctedby = s; next }
         /^title:/  { s = $0; sub(/^title:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); title = s; next }
         /^guards:[ \t]*\[/ {
             s = $0; sub(/^guards:[ \t]*\[/, "", s); sub(/\][ \t]*(#.*)?$/, "", s)
@@ -147,7 +208,18 @@ frontmatter() {
             }
             next
         }
-        /^guards:[ \t]*(#.*)?$/ { inguards = 1; next }
+        /^guards:[ \t]*(#.*)?$/ { inguards = 1; inchecks = 0; next }
+        /^checks:[ \t]*\[/ {
+            s = $0; sub(/^checks:[ \t]*\[/, "", s); sub(/\][ \t]*(#.*)?$/, "", s)
+            n = split(s, a, ",")
+            for (i = 1; i <= n; i++) {
+                c = a[i]
+                gsub(/^[ \t"'\'']+/, "", c); gsub(/[ \t"'\'']+$/, "", c)
+                if (c != "") checks[++nc] = c
+            }
+            next
+        }
+        /^checks:[ \t]*(#.*)?$/ { inchecks = 1; inguards = 0; next }
         END { flush() }
     ' "$@"
 }
@@ -164,6 +236,8 @@ each_decision() { # $1 = root
 # filename convention is load-bearing: dira captures .zavet/specs/ by name).
 #   spec_frontmatter meta  FILE...  -> "slug<TAB>origin<TAB>confidence<TAB>date<TAB>title"
 #   spec_frontmatter paths FILE...  -> "slug<TAB>path glob" (one line per glob)
+#   spec_frontmatter checks FILE... -> "slug<TAB>label<TAB>command" (same item
+#       grammar as a decision's — one key, one dialect, two subjects)
 spec_frontmatter() {
     mode=$1
     shift
@@ -181,17 +255,45 @@ spec_frontmatter() {
             if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
             return s
         }
-        function flush() {
+        # Identical to the splitter in frontmatter() above: the grammar
+        # belongs to the key, not to the record type.
+        # Strip ONE matching pair of surrounding quotes, like the Rust
+        # unquote. Deliberately not the independent-gsub form the guard and
+        # path lists use: a command ending in a quote (runner --grep "A::b")
+        # would lose it. sprintf(%c,34/39) keeps the quotes out of the awk
+        # source, which lives inside a single-quoted shell string.
+        function unpair(v,    f, l, dq, sq) {
+            dq = sprintf("%c", 34); sq = sprintf("%c", 39)
+            if (length(v) < 2) return v
+            f = substr(v, 1, 1); l = substr(v, length(v), 1)
+            if (f == l && (f == dq || f == sq)) return substr(v, 2, length(v) - 2)
+            return v
+        }
+        function splitcheck(s,    i) {
+            i = index(s, "::")
+            if (i > 0) { _lbl = substr(s, 1, i - 1); _cmd = substr(s, i + 2) }
+            else { _lbl = s; _cmd = s }
+            gsub(/^[ \t]+/, "", _lbl); gsub(/[ \t]+$/, "", _lbl)
+            gsub(/^[ \t]+/, "", _cmd); gsub(/[ \t]+$/, "", _cmd)
+            if (_lbl == "") _lbl = _cmd
+        }
+        function flush(    i) {
             # `closed` gates emission: an unclosed --- fence is malformed and
             # yields nothing, matching the Rust parser.
             if (slug != "" && closed) {
                 if (origin == "") origin = "reverse-engineered"
                 if (conf == "") conf = "low"
                 if (mode == "meta") print slug "\t" origin "\t" conf "\t" date "\t" title
+                else if (mode == "checks") {
+                    for (i = 1; i <= nc; i++) {
+                        splitcheck(checks[i])
+                        if (_cmd != "") print slug "\t" _lbl "\t" _cmd
+                    }
+                }
                 else for (i = 1; i <= np; i++) print slug "\t" paths[i]
             }
-            slug = ""; origin = ""; conf = ""; date = ""; title = ""; np = 0
-            fm = 0; done = 0; closed = 0; inpaths = 0
+            slug = ""; origin = ""; conf = ""; date = ""; title = ""; np = 0; nc = 0
+            fm = 0; done = 0; closed = 0; inpaths = 0; inchecks = 0
         }
         FNR == 1 {
             flush()
@@ -213,6 +315,16 @@ spec_frontmatter() {
         }
         inpaths && /^[ \t]+[^ \t]/ { next }
         inpaths { inpaths = 0 }
+        inchecks && /^[ \t]*-[ \t]/ {
+            c = $0; sub(/^[ \t]*-[ \t][ \t]*/, "", c)
+            c = decomment(c)
+            sub(/[ \t]+$/, "", c)
+            c = unpair(c)
+            if (c != "") checks[++nc] = c
+            next
+        }
+        inchecks && /^[ \t]+[^ \t]/ { next }
+        inchecks { inchecks = 0 }
         /^title:/      { s = $0; sub(/^title:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); title = s; next }
         /^origin:/     { s = $0; sub(/^origin:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); origin = s; next }
         /^confidence:/ { s = $0; sub(/^confidence:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); conf = s; next }
@@ -227,7 +339,18 @@ spec_frontmatter() {
             }
             next
         }
-        /^paths:[ \t]*(#.*)?$/ { inpaths = 1; next }
+        /^paths:[ \t]*(#.*)?$/ { inpaths = 1; inchecks = 0; next }
+        /^checks:[ \t]*\[/ {
+            s = $0; sub(/^checks:[ \t]*\[/, "", s); sub(/\][ \t]*(#.*)?$/, "", s)
+            n = split(s, a, ",")
+            for (i = 1; i <= n; i++) {
+                c = a[i]
+                gsub(/^[ \t"'\'']+/, "", c); gsub(/[ \t"'\'']+$/, "", c)
+                if (c != "") checks[++nc] = c
+            }
+            next
+        }
+        /^checks:[ \t]*(#.*)?$/ { inchecks = 1; inpaths = 0; next }
         END { flush() }
     ' "$@"
 }
@@ -277,6 +400,43 @@ cmd_guards() {
     set -- "$root/$ZAVET_DIR"/decisions/D-*.md
     [ -e "$1" ] || return 0
     frontmatter guards "$@"
+}
+
+# "id<TAB>label<TAB>command" for every decision, EVERY status. A guard is an
+# enforcement surface and a superseded record enforces nothing; a check is a
+# claim about how the record was verified, which survives supersession.
+cmd_checks() {
+    root=$(zavet_root)
+    set -- "$root/$ZAVET_DIR"/decisions/D-*.md
+    [ -e "$1" ] || return 0
+    frontmatter checks "$@"
+}
+
+# "id<TAB>corrected-by" for decisions carrying an errata pointer.
+cmd_errata() {
+    root=$(zavet_root)
+    set -- "$root/$ZAVET_DIR"/decisions/D-*.md
+    [ -e "$1" ] || return 0
+    frontmatter errata "$@"
+}
+
+# One "## <heading>" section of a decision, body only. The guard hook uses
+# this to inject directives without the narrative Why when several records
+# match one path.
+cmd_section() {
+    [ $# -ge 2 ] || die "usage: zavet section <id> <heading>"
+    root=$(zavet_root)
+    rel=$(cmd_decision_path "$1") || return 1
+    awk -v want="$2" '
+        # A "## " line opens a section; the next one closes it.
+        /^## / {
+            h = substr($0, 4)
+            sub(/[ \t]+$/, "", h)
+            inside = (h == want)
+            next
+        }
+        inside { print }
+    ' "$root/$rel"
 }
 
 cmd_match() {
@@ -370,6 +530,14 @@ cmd_spec_paths() {
     spec_frontmatter paths "$@"
 }
 
+# "slug<TAB>label<TAB>command" for every spec.
+cmd_spec_checks() {
+    root=$(zavet_root)
+    set -- "$root/$ZAVET_DIR"/specs/*.md
+    [ -e "$1" ] || return 0
+    spec_frontmatter checks "$@"
+}
+
 cmd_spec_match() {
     run_match "$(cmd_spec_paths)"
 }
@@ -386,6 +554,30 @@ cmd_spec_match() {
 # stdout (TSV): violation<TAB>sha7<TAB>ids<TAB>subject
 #               warn-spec<TAB>sha7<TAB>slugs<TAB>subject
 # stderr: human summary. Exit 1 iff violations.
+# Dangling errata: a `corrected-by` naming a record that does not exist.
+#
+# A property of the TREE, not of the commit range, so every exit path of
+# cmd_check runs it — an empty range must still catch a typo'd pointer, which
+# silently leaves the corrected record standing unmarked. Prints one row per
+# bad pointer; returns 1 if any.
+check_errata() {
+    tab=$(printf '\t')
+    n=0
+    while IFS="$tab" read -r id target; do
+        [ -n "$target" ] || continue
+        # Subshell: cmd_decision_path dies on a miss, which would take the
+        # whole check down instead of reporting one bad pointer.
+        ( cmd_decision_path "$target" ) >/dev/null 2>&1 && continue
+        n=$((n + 1))
+        printf 'violation-errata\t%s\t%s\tcorrected-by names a record that does not exist\n' "$id" "$target"
+    done <<EOF
+$(cmd_errata)
+EOF
+    [ "$n" -eq 0 ] && return 0
+    printf 'zavet check: %s corrected-by pointer(s) name a record that does not exist — fix the id.\n' "$n" >&2
+    return 1
+}
+
 cmd_check() {
     [ $# -ge 1 ] || die "usage: zavet check <rev-range>"
     top=$(repo_toplevel) || die "not inside a git repository"
@@ -397,6 +589,7 @@ cmd_check() {
     guards_table=$(cmd_guards)
     specs_table=$(cmd_spec_paths)
     if [ -z "$guards_table" ] && [ -z "$specs_table" ]; then
+        check_errata || return 1
         return 0
     fi
     tab=$(printf '\t')
@@ -408,7 +601,10 @@ cmd_check() {
         fi
         die "cannot resolve range: $*"
     fi
-    [ -n "$all" ] || return 0
+    if [ -z "$all" ]; then
+        check_errata || return 1
+        return 0
+    fi
     # Commits already carrying a trailer never violate — their diffs are
     # never even listed. Regexes verbatim from the guard-commit hook.
     refs_set="$nl$(git rev-list --no-merges -E --grep='(Refs|Supersedes):[[:space:]]*D-[0-9]+' "$@" --)$nl"
@@ -451,10 +647,16 @@ cmd_check() {
             fi
         fi
     done
+    # Two counters, two messages: conflating them would report a tree-wide
+    # authoring error as a count of commits, which is not actionable.
+    # Two counters, two messages: conflating them would report a tree-wide
+    # authoring error as a count of commits, which is not actionable.
     if [ "$violations" -gt 0 ]; then
         printf 'zavet check: %s commit(s) touch guarded paths without a Refs:/Supersedes: trailer — amend or rebase to add them.\n' "$violations" >&2
+        check_errata || true
         return 1
     fi
+    check_errata || return 1
     if [ "$warnings" -gt 0 ]; then
         printf 'zavet check: %s commit(s) touch spec-covered paths without a Spec: trailer (warning only — keep specs current).\n' "$warnings" >&2
     fi
@@ -499,6 +701,35 @@ cmd_audit() {
     tab=$(printf '\t')
     guards_table=$(cmd_guards)
     specs_table=$(cmd_spec_paths)
+    checks_table=$(cmd_checks)
+
+    # --- uncovered invariants: a record that tells an agent what to do but
+    # never says how anyone would know it still holds. Reported, not failed —
+    # plenty of real invariants are not mechanically checkable, and the point
+    # is that the record SAYS so rather than leaving it assumed.
+    for f in "$root/$ZAVET_DIR"/decisions/D-*.md; do
+        [ -e "$f" ] || continue
+        id=${f##*/}
+        id=${id%%-*}
+        id=${id%.md}
+        grep -q '^## Agent directives' "$f" 2>/dev/null || continue
+        printf '%s\n' "$checks_table" | awk -F '\t' -v i="$id" '$1 == i { found = 1 } END { exit !found }' && continue
+        printf 'uncovered-invariant\t%s\t%s\n' "$id" "$(basename "$f")"
+    done
+
+    # --- long records: the capture bar is about what a reader could not
+    # reconstruct, not about length — but a record that has grown into a
+    # feature spec is one nobody re-reads, and guards inject it verbatim.
+    for f in "$root/$ZAVET_DIR"/decisions/D-*.md; do
+        [ -e "$f" ] || continue
+        n=$(wc -l <"$f")
+        n=$((n + 0))
+        [ "$n" -gt 60 ] || continue
+        id=${f##*/}
+        id=${id%%-*}
+        id=${id%.md}
+        printf 'long-record\t%s\t%s\n' "$id" "$n"
+    done
 
     # --- stale specs: commits touching a spec's paths since the spec file
     # itself last changed. Never-committed specs are skipped (fresh).
@@ -588,6 +819,105 @@ replace_block() { # $1 = index file, $2 = start marker, $3 = end marker, $4 = bl
     ' "$1" >"$tmp" && mv "$tmp" "$1"
 }
 
+# Run the checks bound to matching records and report PASS/FAIL.
+#
+# THE ONLY SUBCOMMAND THAT EXECUTES REPO CONTENT. It is never wired into a
+# hook and never runs implicitly: cloning a repo and opening an agent session
+# must not be able to run its commands. See SECURITY.md.
+#
+# Selection (all optional, AND-ed): --id / --spec pick one record, --paths
+# resolves through the SAME run_match/spec-match tables the hooks and
+# `zavet check` use (so CI semantics == hook semantics), --grep filters by
+# label substring. No arguments runs everything.
+#
+# The command is opaque: exit 0 is pass, anything else is fail. Nothing here
+# knows a test framework, and no output is parsed.
+cmd_verify() {
+    root=$(zavet_root)
+    want_id=""; want_spec=""; grep_pat=""; paths=""; have_paths=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --id) shift; want_id=${1:-} ;;
+            --spec) shift; want_spec=${1:-} ;;
+            --grep) shift; grep_pat=${1:-} ;;
+            --paths)
+                shift
+                have_paths=1
+                while [ $# -gt 0 ]; do
+                    case "$1" in --*) break ;; esac
+                    paths="$paths$1
+"
+                    shift
+                done
+                continue
+                ;;
+            *) die "usage: zavet verify [--id D-NNNN] [--spec <slug>] [--paths f...] [--grep <substr>]" ;;
+        esac
+        shift
+    done
+
+    # Path selection resolves to the records covering those paths, then the
+    # normal id/slug filter applies to the result.
+    sel_ids=""; sel_slugs=""
+    if [ "$have_paths" -eq 1 ]; then
+        sel_ids=$(printf '%s' "$paths" | cmd_match_batch)
+        sel_slugs=$(printf '%s' "$paths" | cmd_spec_match)
+    fi
+
+    # Materialize the candidate list FIRST, then loop reading from the file:
+    # a `... | while` runs the loop in a subshell, where the tallies could not
+    # escape. "kind<TAB>subject<TAB>label<TAB>command".
+    tab=$(printf '\t')
+    list="${TMPDIR:-/tmp}/zavet-verify-$$"
+    { cmd_checks | sed "s/^/decision$tab/"
+      cmd_spec_checks | sed "s/^/spec$tab/"
+    } >"$list" 2>/dev/null
+
+    ran=0
+    fail=0
+    while IFS="$tab" read -r kind subject label command; do
+        [ -n "$command" ] || continue
+        case "$kind" in
+            decision)
+                [ -z "$want_spec" ] || continue
+                [ -z "$want_id" ] || [ "$want_id" = "$subject" ] || continue
+                if [ "$have_paths" -eq 1 ]; then
+                    printf '%s\n' "$sel_ids" | grep -qx -- "$subject" || continue
+                fi
+                ;;
+            spec)
+                [ -z "$want_id" ] || continue
+                [ -z "$want_spec" ] || [ "$want_spec" = "$subject" ] || continue
+                if [ "$have_paths" -eq 1 ]; then
+                    printf '%s\n' "$sel_slugs" | grep -qx -- "$subject" || continue
+                fi
+                ;;
+        esac
+        if [ -n "$grep_pat" ]; then
+            case "$label" in *"$grep_pat"*) ;; *) continue ;; esac
+        fi
+        ran=$((ran + 1))
+        # Check output goes to stderr so stdout stays a clean PASS/FAIL table.
+        # Exit 0 is pass; nothing about the output is inspected.
+        if (cd "$root" && sh -c "$command" >&2 2>&1); then
+            printf 'PASS\t%s\t%s\n' "$subject" "$label"
+            cmd_emit check_passed "$subject" >/dev/null 2>&1 || true
+        else
+            printf 'FAIL\t%s\t%s\n' "$subject" "$label"
+            cmd_emit check_failed "$subject" >/dev/null 2>&1 || true
+            fail=$((fail + 1))
+        fi
+    done <"$list"
+    rm -f "$list"
+
+    if [ "$ran" -eq 0 ]; then
+        printf 'zavet: no checks matched\n' >&2
+        return 0
+    fi
+    printf 'zavet: %s check(s) run, %s failed\n' "$ran" "$fail" >&2
+    [ "$fail" -eq 0 ] || return 1
+    return 0
+}
 cmd_index() {
     root=$(zavet_root)
     idx="$root/$ZAVET_DIR/INDEX.md"
@@ -692,6 +1022,11 @@ case "$cmd" in
     specs) cmd_specs ;;
     spec-paths) cmd_spec_paths ;;
     spec-match) cmd_spec_match ;;
+    checks) cmd_checks ;;
+    spec-checks) cmd_spec_checks ;;
+    errata) cmd_errata ;;
+    section) cmd_section "$@" ;;
+    verify) cmd_verify "$@" ;;
     check) cmd_check "$@" ;;
     audit) cmd_audit ;;
     decision-path) cmd_decision_path "$@" ;;
