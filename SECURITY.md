@@ -54,6 +54,30 @@ that is a bug worth reporting even if it isn't itself an exploitable vulnerabili
 Fail-open is a safety property for availability, not a claim about what the hooks are
 authorized to do — see the next section for what they can still act on.
 
+## `zavet verify` executes repository content
+
+`zavet verify` (and the `/zavet:verify` command) runs the shell commands recorded in a
+record's `checks:` frontmatter. It is the **only** part of this plugin that executes
+anything out of the repository, and the rule that keeps that safe is a hard one:
+
+- It runs **only on an explicit invocation** — a human typing `/zavet:verify`, or a CI job
+  that opted in by calling `zavet verify`.
+- It is **never wired into a hook**. No `PreToolUse`, no `PostToolUse`, no `SessionStart`.
+  Cloning a repository and opening an agent session in it must never be able to run that
+  repository's commands, and a `checks:` entry must never turn reading a record into
+  running it.
+- Nothing else in the plugin ever shells out to a `checks:` value. The edit and commit
+  hooks read `guards`, `Agent directives` and `corrected-by`; they do not look at
+  `checks:` at all.
+
+The fail-open posture above deliberately does **not** apply here: `verify` reports a
+non-zero exit when a check fails, because a check that silently passes on error is worse
+than no check.
+
+Treat a pull request that adds a `checks:` entry the way you would treat one that edits a
+CI workflow or a `package.json` script — it is a request to run that command on whoever
+runs `verify` next.
+
 ## Dependency surface
 
 `bin/zavet` and the hook scripts are POSIX `sh`. The exact dependency split:

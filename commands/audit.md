@@ -14,7 +14,8 @@ flips, no verification. It surfaces what a human should look at.
 2. Run the deterministic sweep (works without dira):
    `sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" audit` — type-tagged TSV rows:
    `stale-spec slug n since-sha`, `stale-decision id n since-sha`,
-   `guard-pressure id glob matched total`.
+   `guard-pressure id glob matched total`, `uncovered-invariant id file`,
+   `long-record id lines`.
 3. **Conflicts** (unless focused elsewhere): for each `stale-decision`,
    worst drift first, open the record
    (`sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" decision-path <id>`), read its
@@ -33,7 +34,22 @@ flips, no verification. It surfaces what a human should look at.
    guards should be *as narrow as possible — over-broad guards cause alert
    fatigue*. Suggested action: narrow the glob (a frontmatter-only edit),
    or supersede the decision if its scope truly changed.
-6. Compose the report in that order — Conflicts, Stale specs, Guard
-   pressure — each with concrete next steps (`/zavet:decide` to supersede,
-   `/zavet:spec` to refresh, glob narrowing). End with the one-line health
-   summary: N decisions (M stale), K specs (J stale), widest guard.
+6. **Unverified invariants**: `uncovered-invariant` rows are records that
+   tell an agent what to do but never say how anyone would know it still
+   holds. Report the count and name the ones whose directives look
+   mechanically checkable. Do NOT treat the count as a defect list — many
+   invariants genuinely cannot be checked, and for those the fix is a
+   `## Verification` note saying so, not a check. Suggested action:
+   `/zavet:verify`, which proposes checks and runs the existing ones.
+7. **Over-long records**: `long-record` rows are records past 60 lines. The
+   capture bar is about what a reader could not reconstruct, not length — but
+   a record that grew into a feature spec is one nobody re-reads, and the
+   guard hook pays for every line of it on each guarded edit. Suggested
+   action: move the narrative into a living spec (`/zavet:spec`) and leave
+   the decision as the decision.
+8. Compose the report in that order — Conflicts, Stale specs, Guard
+   pressure, Unverified invariants, Over-long records — each with concrete
+   next steps (`/zavet:decide` to supersede or correct, `/zavet:spec` to
+   refresh, `/zavet:verify` to check, glob narrowing). End with the one-line
+   health summary: N decisions (M stale, U unchecked), K specs (J stale),
+   widest guard.

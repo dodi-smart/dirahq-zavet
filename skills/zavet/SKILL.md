@@ -68,11 +68,48 @@ Explicit entry points exist for the non-default flows: `/zavet:spec design
   decision). The commit hook enforces this.
 - Never work around a guard by re-wording the change. If the decision is wrong
   or stale, supersede it explicitly — that is a feature, not a failure.
+- When several decisions guard one path, the hook shows their **Agent
+  directives** rather than the whole records, and names each record path. If
+  you need the reasoning behind a directive, open the record it names.
+
+## Checks — saying how a record is verified
+
+- A record's `checks:` bind an invariant to the command that proves it, as
+  `label :: command`. An item with no `::` IS the command.
+- The command is **opaque and stack-agnostic**: whatever this repo already
+  uses to test itself. Read `package.json` / `justfile` / `Makefile` /
+  `Cargo.toml` / the CI workflow to find it. Never invent a runner, never
+  assume a framework, never parse a command's output — **exit 0 is pass** and
+  that is the entire contract.
+- Checks run ONLY from `/zavet:verify`, which a human invokes. Never wire them
+  into a hook or run them because a record happens to mention one.
+- When you record an invariant, say how it is verified: a `checks:` entry if it
+  is mechanically checkable, or a `## Verification` note saying plainly that it
+  is not. **Silence reads as coverage.** And a check that cannot fail is worse
+  than no check — it manufactures the confidence it was supposed to earn.
+- A FAIL means something recorded as true no longer is. Read the record and say
+  which is wrong, the code or the decision. Never edit a check to make it pass.
+
+## Correcting versus superseding
+
+Two different things, and the distinction is why supersession goes unused:
+
+- **Supersede** when a decision is replaced: `status: superseded` +
+  `superseded-by: D-MMMM` on the old record.
+- **Correct** when the decision still stands but ONE claim inside it is wrong.
+  Add `corrected-by: D-MMMM` to the old record; it stays `active` and its body
+  is untouched, and every recall path leads with the correction.
+
+Do not write a correction as prose inside an unrelated later record. That is
+the habit this key exists to replace: it leaves the wrong claim standing
+unmarked, and the next reader hits it first.
 
 ## Honesty rules
 
-- Decision records are **append-only**. The only permitted mutation of an
-  existing record is `status: active → superseded` + `superseded-by: D-MMMM`.
+- Decision records are **append-only**. The only permitted mutations of an
+  existing record are `status: active → superseded` + `superseded-by: D-MMMM`,
+  and adding `corrected-by: D-MMMM`. Both are frontmatter-only; the body of a
+  recorded decision is never rewritten.
 - Anything reconstructed from existing code is `origin: reverse-engineered`,
   `verified: false`, with an Open Questions section. A wrong recorded "why" is
   worse than none — never invent rationale.

@@ -20,6 +20,14 @@ paths:
 # Decisions that shaped this feature. Optional — D-NNNN references anywhere
 # in the body are auto-linked too.
 decisions: []
+# Scenarios proving this feature still behaves, as `label :: command`. Same
+# grammar as a decision's checks and the same posture: the command is opaque
+# (any runner, any stack), exit 0 is pass, and it runs only when a human asks
+# via `zavet verify` — never from a hook. A spec's checks are feature-level
+# ("this flow still works"), where a decision's are invariants
+# ("this must never become true again").
+checks:
+  - short name for the scenario :: command that exits non-zero when it breaks
 ---
 
 ## Overview
