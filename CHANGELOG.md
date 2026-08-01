@@ -1,3 +1,13 @@
+## [1.1.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.0.0...v1.1.0) (2026-08-01)
+
+### ✨ Features
+
+* **plugin:** record how an invariant is verified, and correct without replacing ([#9](https://github.com/dodi-smart/dirahq-zavet/issues/9)) ([35fbdc3](https://github.com/dodi-smart/dirahq-zavet/commit/35fbdc3313b99a0c6b359c012b637ab40181beb6)), closes [dodi-smart/dirahq-cli#82](https://github.com/dodi-smart/dirahq-cli/issues/82)
+
+### 👷 Continuous Integration
+
+* **ci:** make cross-repo dialect drift a hard failure ([#8](https://github.com/dodi-smart/dirahq-zavet/issues/8)) ([9909250](https://github.com/dodi-smart/dirahq-zavet/commit/99092504fe8cf51084914c0de9b92c41cb235930))
+
 ## 1.0.0 (2026-07-20)
 
 ### ✨ Features
