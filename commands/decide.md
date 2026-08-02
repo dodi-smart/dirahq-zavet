@@ -6,6 +6,11 @@ argument-hint: [short description of the decision]
 Record a decision: $ARGUMENTS
 
 1. Get the next id: `sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" next-id`
+
+   It counts ids across every ref this clone can see, not just the checked-out
+   tree, so a number taken on another branch is not handed out twice. It cannot
+   see a branch that was never fetched, so if this is a long-lived branch,
+   fetch first. `zavet check` fails the PR if a collision lands anyway.
 2. Create `.zavet/decisions/<id>-<slug>.md` from the template at
    `${CLAUDE_PLUGIN_ROOT}/templates/decision.md`. Rules:
    - **Keep it under 60 lines.** A decision is a record, not an essay. Past
