@@ -11,6 +11,8 @@
 #   audit   — staleness + guard-pressure sweeps over real history
 #   verify  — running recorded checks (the one command that executes repo
 #             content), plus section extraction and the guard-injection budget
+#   ids     — decision-id collisions: next-id across refs, duplicate detection,
+#             and the refusal to resolve an ambiguous id
 set -u
 
 # shellcheck disable=SC1007
@@ -382,6 +384,107 @@ base=$(gc rev-parse HEAD)
 out=$( (cd "$R" && sh "$Z" check "$base..$base" 2>/dev/null) ); rc=$?
 assert_eq "check fails on a dangling corrected-by" "1" "$rc"
 assert_eq "check names the bad pointer" "violation-errata	D-0003	D-4242" "$(printf '%s\n' "$out" | cut -f1,2,3)"
+
+# -------------------------------------------------------------------- ids --
+printf -- '-- ids\n'
+R="$TMP/ids"
+new_repo "$R"
+
+assert_eq "next-id on an empty repo" "D-0001" "$( (cd "$R" && sh "$Z" next-id) )"
+
+cat >"$R/.zavet/decisions/D-0001-first.md" <<'EOF'
+---
+id: D-0001
+title: First
+status: active
+---
+body
+EOF
+assert_eq "next-id counts the working tree" "D-0002" "$( (cd "$R" && sh "$Z" next-id) )"
+
+# The real collision: a decision that exists only on ANOTHER branch. The old
+# next-id looked at the checked-out tree alone, so this returned D-0002 and two
+# branches picked the same number.
+gc add -A >/dev/null 2>&1
+gc commit -qm "first" >/dev/null 2>&1
+gc checkout -q -b other 2>/dev/null
+cat >"$R/.zavet/decisions/D-0002-on-a-branch.md" <<'EOF'
+---
+id: D-0002
+title: Written on another branch
+status: active
+---
+body
+EOF
+gc add -A >/dev/null 2>&1
+gc commit -qm "second, elsewhere" >/dev/null 2>&1
+gc checkout -q - 2>/dev/null
+if [ -e "$R/.zavet/decisions/D-0002-on-a-branch.md" ]; then
+    fail "fixture: D-0002 must not be in this tree"
+else
+    pass "fixture: D-0002 lives only on the other branch"
+fi
+assert_eq "next-id sees ids taken on other refs" "D-0003" "$( (cd "$R" && sh "$Z" next-id) )"
+
+# Append-only: a deleted record still burns its number, or every Refs: trailer
+# already in the log would point at a different decision.
+gc checkout -q other 2>/dev/null
+gc rm -q ".zavet/decisions/D-0002-on-a-branch.md" >/dev/null 2>&1 || rm -f "$R/.zavet/decisions/D-0002-on-a-branch.md"
+gc commit -qm "delete it" >/dev/null 2>&1
+assert_eq "a deleted id is never reissued" "D-0003" "$( (cd "$R" && sh "$Z" next-id) )"
+gc checkout -q - 2>/dev/null
+
+# --- what a bad merge leaves behind: two records, one id.
+R="$TMP/ids-dup"
+new_repo "$R"
+# The shape a clean auto-merge actually produces: both branches ran next-id,
+# both got D-0016, each wrote its own slug.
+cat >"$R/.zavet/decisions/D-0016-ours.md" <<'EOF'
+---
+id: D-0016
+title: Ours
+status: active
+guards:
+  - src/**
+---
+body
+EOF
+cat >"$R/.zavet/decisions/D-0016-theirs.md" <<'EOF'
+---
+id: D-0016
+title: Theirs
+status: active
+---
+body
+EOF
+gc add -A >/dev/null 2>&1
+gc commit -qm "records" >/dev/null 2>&1
+base=$(gc rev-parse HEAD)
+out=$( (cd "$R" && sh "$Z" check "$base..$base" 2>/dev/null) ); rc=$?
+assert_eq "check fails on a duplicate id" "1" "$rc"
+assert_eq "check names both files" "violation-duplicate-id	D-0016	D-0016-ours.md D-0016-theirs.md" "$out"
+
+# Resolution must refuse rather than silently pick one — the silent pick is
+# what loses a record and its guards.
+if ( cd "$R" && sh "$Z" decision-path D-0016 ) >/dev/null 2>&1; then
+    fail "decision-path resolves an ambiguous id"
+else
+    pass "decision-path refuses an ambiguous id"
+fi
+
+# `D-7` and `D-0016` style shorthand: ONE id to dira, two filenames here. The
+# glob-based resolver sees them as separate files (sh does not canonicalize —
+# a documented divergence), so `check` is the only thing that can catch it.
+R="$TMP/ids-shorthand"
+new_repo "$R"
+printf -- '---\nid: D-0007\nstatus: active\n---\nbody\n' >"$R/.zavet/decisions/D-0007-padded.md"
+printf -- '---\nid: D-0007\nstatus: active\n---\nbody\n' >"$R/.zavet/decisions/D-7-shorthand.md"
+gc add -A >/dev/null 2>&1
+gc commit -qm "records" >/dev/null 2>&1
+base=$(gc rev-parse HEAD)
+out=$( (cd "$R" && sh "$Z" check "$base..$base" 2>/dev/null) ); rc=$?
+assert_eq "check fails on a canonical duplicate" "1" "$rc"
+assert_eq "check canonicalizes before comparing" "violation-duplicate-id	D-0007	D-0007-padded.md D-7-shorthand.md" "$out"
 
 # ---------------------------------------------------------------- summary --
 if [ "$fails" -gt 0 ]; then

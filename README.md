@@ -118,9 +118,19 @@ commit range, any non-merge commit whose changed files match an **active
 guard glob** must carry a `Refs: D-NNNN` or `Supersedes: D-NNNN` trailer in
 its commit message — exactly the rule the commit hook applies interactively.
 Commits touching **spec-covered paths** without a `Spec: <slug>` trailer
-produce warnings only (the hook is a nudge; CI is not stricter). Exit code:
-`1` only on guard violations; repos without `.zavet/` pass, so one org-wide
-workflow is safe.
+produce warnings only (the hook is a nudge; CI is not stricter).
+
+Two tree-wide checks run on every invocation, whatever the range covers,
+because both are properties of the records rather than of the commits:
+
+- **duplicate ids** — two records claiming one `D-NNNN`. Ids are chosen per
+  branch, so two branches open at once can both pick the same number; in CI
+  this runs against the merge result, so the collision fails the PR instead of
+  landing. Compared canonically, so `D-7` cannot hide behind `D-0007`.
+- **dangling `corrected-by`** — a pointer naming a record that does not exist.
+
+Exit code `1` on any of the three; repos without `.zavet/` pass, so one
+org-wide workflow is safe.
 
 ```yaml
 - uses: actions/checkout@v4
@@ -131,8 +141,20 @@ workflow is safe.
 ```
 
 For push builds: `git fetch origin main && sh bin/zavet check origin/main..HEAD`.
-Output is TSV (`violation`/`warn-spec` rows: sha, ids/slugs, subject) with a
-human summary on stderr.
+Output is TSV (`violation` / `warn-spec` / `violation-duplicate-id` /
+`violation-errata` rows) with a human summary on stderr.
+
+`fetch-depth: 0` matters for a second reason: `zavet next-id` takes the next
+free id from the working tree **and every decision filename that has ever
+existed on any ref**, so a shallow clone that cannot see the other branches
+hands out an id someone else already took. History counts as well as the
+current tree — ids are append-only, and a deleted record still burns its
+number, or the `Refs: D-NNNN` trailers already in the log would start pointing
+at a different decision.
+
+That scan is best-effort by construction: a branch this clone has never
+fetched is invisible to it. The duplicate-id check above is the guarantee —
+`next-id` just makes it rare that the guarantee has to fire.
 
 ## dira integration (optional)
 

@@ -377,9 +377,29 @@ cmd_init() {
     printf 'zavet: next steps — edit RULES.md, then record your first decision (/zavet:decide)\n'
 }
 
+# The next free decision id.
+#
+# Scans the checked-out tree AND every decision filename that has ever existed
+# on any ref. Looking only at the tree — as this used to — means two branches
+# open at the same time always pick the SAME number: the collision surfaces
+# only if INDEX.md happens to conflict, and a clean auto-merge lands two
+# records sharing an id, where `decision-path` resolves by filename and one
+# silently wins along with its guards.
+#
+# History, not just the current tree, because ids are append-only: a record
+# that was written and later deleted has still burned its number, and reissuing
+# it would orphan every `Refs: D-NNNN` trailer already in the log.
+#
+# Best-effort by construction — a branch this clone has never fetched is
+# invisible here. `zavet check` is the guarantee (it runs in CI, where the base
+# branch IS present and the merge result is what gets checked); this closes the
+# common case so the guarantee rarely has to fire.
 cmd_next_id() {
     root=$(zavet_root)
-    max=$(each_decision "$root" | awk -F/ '{
+    max=$({
+        each_decision "$root"
+        git -C "$root" log --all --format= --name-only -- "$ZAVET_DIR/decisions" 2>/dev/null
+    } | awk -F/ '{
         f = $NF
         sub(/^D-/, "", f)
         sub(/[-.].*$/, "", f)
@@ -554,6 +574,58 @@ cmd_spec_match() {
 # stdout (TSV): violation<TAB>sha7<TAB>ids<TAB>subject
 #               warn-spec<TAB>sha7<TAB>slugs<TAB>subject
 # stderr: human summary. Exit 1 iff violations.
+# Two records claiming one decision id.
+#
+# THE guarantee behind `next-id`'s best effort. Ids are chosen per branch from
+# whatever that clone can see, so two branches open at once can both pick the
+# same number; nothing surfaces it unless INDEX.md happens to conflict. In CI
+# this runs against the merge result, where both records are present, so a
+# collision fails the PR instead of landing and silently shadowing one record.
+#
+# Compared CANONICALLY (`D-16` and `D-0016` are one id, as dira reads them),
+# so a shorthand filename cannot hide a collision from a string compare.
+#
+# A property of the TREE, not the commit range — like check_errata, every exit
+# path of cmd_check runs it.
+# Does ANY record claim this id? Deliberately not cmd_decision_path, which
+# now refuses an ambiguous id: a duplicated target is a duplicate-id problem,
+# and reporting it as a DANGLING pointer as well would name the wrong defect.
+decision_exists() {
+    root=$(zavet_root)
+    dir="$root/$ZAVET_DIR/decisions"
+    [ -f "$dir/$1.md" ] && return 0
+    for f in "$dir/$1-"*.md; do
+        [ -e "$f" ] && return 0
+    done
+    return 1
+}
+
+check_duplicate_ids() {
+    root=$(zavet_root)
+    dups=$(each_decision "$root" | awk -F/ '
+        {
+            f = $NF
+            n = f
+            sub(/^D-/, "", n)
+            sub(/[-.].*$/, "", n)
+            if (n !~ /^[0-9]+$/) next
+            id = sprintf("D-%04d", n + 0)
+            files[id] = (id in seen) ? files[id] " " f : f
+            seen[id] = 1
+            count[id]++
+        }
+        END { for (id in count) if (count[id] > 1) print id "\t" files[id] }
+    ' | sort)
+    [ -n "$dups" ] || return 0
+    printf '%s\n' "$dups" | while IFS= read -r row; do
+        [ -n "$row" ] || continue
+        printf 'violation-duplicate-id\t%s\n' "$row"
+    done
+    n=$(printf '%s\n' "$dups" | grep -c .)
+    printf 'zavet check: %s decision id(s) claimed by more than one record — rename the newer one and update its references.\n' "$n" >&2
+    return 1
+}
+
 # Dangling errata: a `corrected-by` naming a record that does not exist.
 #
 # A property of the TREE, not of the commit range, so every exit path of
@@ -565,9 +637,9 @@ check_errata() {
     n=0
     while IFS="$tab" read -r id target; do
         [ -n "$target" ] || continue
-        # Subshell: cmd_decision_path dies on a miss, which would take the
-        # whole check down instead of reporting one bad pointer.
-        ( cmd_decision_path "$target" ) >/dev/null 2>&1 && continue
+        # Subshell: these probes die on a miss, which would take the whole
+        # check down instead of reporting one bad pointer.
+        ( decision_exists "$target" ) >/dev/null 2>&1 && continue
         n=$((n + 1))
         printf 'violation-errata\t%s\t%s\tcorrected-by names a record that does not exist\n' "$id" "$target"
     done <<EOF
@@ -589,8 +661,10 @@ cmd_check() {
     guards_table=$(cmd_guards)
     specs_table=$(cmd_spec_paths)
     if [ -z "$guards_table" ] && [ -z "$specs_table" ]; then
-        check_errata || return 1
-        return 0
+        rc=0
+        check_duplicate_ids || rc=1
+        check_errata || rc=1
+        return "$rc"
     fi
     tab=$(printf '\t')
     nl='
@@ -602,8 +676,10 @@ cmd_check() {
         die "cannot resolve range: $*"
     fi
     if [ -z "$all" ]; then
-        check_errata || return 1
-        return 0
+        rc=0
+        check_duplicate_ids || rc=1
+        check_errata || rc=1
+        return "$rc"
     fi
     # Commits already carrying a trailer never violate — their diffs are
     # never even listed. Regexes verbatim from the guard-commit hook.
@@ -651,12 +727,16 @@ cmd_check() {
     # authoring error as a count of commits, which is not actionable.
     # Two counters, two messages: conflating them would report a tree-wide
     # authoring error as a count of commits, which is not actionable.
+    rc=0
     if [ "$violations" -gt 0 ]; then
         printf 'zavet check: %s commit(s) touch guarded paths without a Refs:/Supersedes: trailer — amend or rebase to add them.\n' "$violations" >&2
-        check_errata || true
-        return 1
+        rc=1
     fi
-    check_errata || return 1
+    # Both tree-wide checks always report, so one PR shows every problem it has
+    # rather than surfacing them one merge at a time.
+    check_duplicate_ids || rc=1
+    check_errata || rc=1
+    [ "$rc" -eq 0 ] || return 1
     if [ "$warnings" -gt 0 ]; then
         printf 'zavet check: %s commit(s) touch spec-covered paths without a Spec: trailer (warning only — keep specs current).\n' "$warnings" >&2
     fi
@@ -670,16 +750,22 @@ cmd_decision_path() {
     # The D-NNNN[-slug].md filename convention is load-bearing (dira captures
     # that directory), so the id resolves by filename — no frontmatter parse.
     found=""
+    n=0
     if [ -f "$dir/$1.md" ]; then
         found="$dir/$1.md"
-    else
-        for f in "$dir/$1-"*.md; do
-            [ -e "$f" ] || continue
-            found=$f
-            break
-        done
+        n=1
     fi
+    for f in "$dir/$1-"*.md; do
+        [ -e "$f" ] || continue
+        [ -n "$found" ] || found=$f
+        n=$((n + 1))
+    done
     [ -n "$found" ] || die "no decision with id $1"
+    # Two records claiming one id is a merge accident, not a choice. Picking
+    # the first silently loses the other record AND its guards, so refuse.
+    if [ "$n" -gt 1 ]; then
+        die "id $1 is claimed by $n records — rename one (zavet check reports this)"
+    fi
     printf '%s\n' "${found#"$root"/}"
 }
 
