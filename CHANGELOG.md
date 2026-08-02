@@ -1,3 +1,9 @@
+## [1.1.1](https://github.com/dodi-smart/dirahq-zavet/compare/v1.1.0...v1.1.1) (2026-08-02)
+
+### 🐛 Bug Fixes
+
+* **plugin:** stop two branches from claiming the same decision id ([19f3000](https://github.com/dodi-smart/dirahq-zavet/commit/19f3000e934ad63e947d58e1e5ef18a8f69a0a08))
+
 ## [1.1.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.0.0...v1.1.0) (2026-08-01)
 
 ### ✨ Features
