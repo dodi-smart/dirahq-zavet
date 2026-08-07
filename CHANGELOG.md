@@ -1,3 +1,9 @@
+## [1.2.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.1.1...v1.2.0) (2026-08-07)
+
+### ✨ Features
+
+* **plugin:** give each repo its own decision-id prefix ([9d724f2](https://github.com/dodi-smart/dirahq-zavet/commit/9d724f25966e3797b3225e612240c00a5eb132fa)), closes [dodi-smart/dirahq-cli#97](https://github.com/dodi-smart/dirahq-cli/issues/97)
+
 ## [1.1.1](https://github.com/dodi-smart/dirahq-zavet/compare/v1.1.0...v1.1.1) (2026-08-02)
 
 ### 🐛 Bug Fixes
