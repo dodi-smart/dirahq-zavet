@@ -1,3 +1,9 @@
+## [1.3.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.2.0...v1.3.0) (2026-08-07)
+
+### ✨ Features
+
+* **plugin:** make zavet work on every harness, not just Claude Code ([92778f9](https://github.com/dodi-smart/dirahq-zavet/commit/92778f9cb883e3650f4f6e805c31869288d8bbb8))
+
 ## [1.2.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.1.1...v1.2.0) (2026-08-07)
 
 ### ✨ Features
