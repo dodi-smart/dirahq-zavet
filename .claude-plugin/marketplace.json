@@ -10,7 +10,18 @@
     {
       "name": "zavet",
       "source": "./",
-      "description": "Repo-local knowledge layer: decision records, guard hooks, git trailers — optionally correlated with dira time tracking."
+      "description": "Repo-local knowledge layer: decision records, guard hooks, git trailers — optionally correlated with dira time tracking.",
+      "skills": [
+        "./.agents/skills/zavet",
+        "./.agents/skills/zavet-init",
+        "./.agents/skills/zavet-decide",
+        "./.agents/skills/zavet-why",
+        "./.agents/skills/zavet-wiki",
+        "./.agents/skills/zavet-backfill",
+        "./.agents/skills/zavet-spec",
+        "./.agents/skills/zavet-audit",
+        "./.agents/skills/zavet-verify"
+      ]
     }
   ]
 }

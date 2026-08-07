@@ -1,11 +1,21 @@
 ---
+name: zavet-init
 description: Scaffold the .zavet/ knowledge layer in the current repository
+allowed-tools: Bash(.zavet/bin/zavet:*) Read Grep Glob
+metadata:
+  source: "commands/init.md"
+  generated: "true"
 ---
+
+<!-- GENERATED from commands/init.md by scripts/gen-adapters.sh — do not edit. -->
+
+Commands below use this repo's vendored CLI at `.zavet/bin/zavet`, written by
+`zavet adapters`. If zavet is on your PATH instead, use plain `zavet`.
 
 Initialize the zavet knowledge layer in this repository.
 
 1. **Pick the decision-id prefix with the user, before scaffolding.** Run
-   `sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" suggest` — it prints
+   `sh ".zavet/bin/zavet" suggest` — it prints
    `candidate<TAB>prefix<TAB>rationale` rows, best first, plus
    `taken<TAB>prefix<TAB>repo` for any prefix a sibling repo already holds.
 
@@ -22,7 +32,7 @@ Initialize the zavet knowledge layer in this repository.
    This is the one moment the choice is free. Changing it later works, but
    leaves two prefixes in play forever — records already minted keep their ids.
 2. Scaffold with the chosen prefix:
-   `sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" init --prefix <PREFIX>`
+   `sh ".zavet/bin/zavet" init --prefix <PREFIX>`
    (omit `--prefix` to accept the top candidate).
 
    This also writes the cross-harness layer, so the repo's guards hold for
@@ -44,10 +54,10 @@ Initialize the zavet knowledge layer in this repository.
    and `.grok/rules/zavet.md` pick the change up on the next `zavet index`.
 5. Ask the user whether there are existing intentional-but-undocumented
    behaviors worth recording immediately as first decisions; if so, run
-   /zavet:decide for each they can state from memory (those are recorded
-   fact), and offer /zavet:backfill to reverse-engineer the rest of the
+   zavet-decide for each they can state from memory (those are recorded
+   fact), and offer zavet-backfill to reverse-engineer the rest of the
    codebase into honestly-unverified records. For the features themselves,
-   offer `/zavet:spec backfill <feature>` (living specs) — going forward
+   offer `zavet-spec backfill <feature>` (living specs) — going forward
    specs stay current transparently as agents work.
 6. Suggest committing everything scaffolded — `.zavet/`, `AGENTS.md` and
    `.grok/` — with message `docs: initialize zavet knowledge layer`. The

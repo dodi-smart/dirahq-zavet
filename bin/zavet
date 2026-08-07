@@ -63,10 +63,40 @@ Usage:
                               guarded paths without a Refs:/Supersedes:
                               trailer; warn on spec-covered paths without a
                               Spec: trailer (exit 1 only on violations)
+  zavet gate [--staged] [--paths-from <f|->] [--message <text>]
+             [--message-file <f>] [--session <id>] [--emit]
+             [--guards-only|--nudge-only]
+                              THE guard wall over one prospective commit: the
+                              staged paths plus its message. Prints the reason
+                              text and exits 1 when it should be blocked, exits
+                              0 silently otherwise. Every enforcement surface
+                              (live harness hooks, the commit-msg git hook)
+                              calls this, so they cannot drift apart.
   zavet audit                 Report stale specs, stale decisions, and guard
                               pressure as TAB-separated rows (report-only)
-  zavet index                 Regenerate the decisions + specs blocks of .zavet/INDEX.md
-  zavet deny <reason>         Print a PreToolUse permission-deny JSON (for hooks)
+  zavet index                 Regenerate .zavet/INDEX.md, plus the generated
+                              agent-context files (see rules / agents-md)
+  zavet rules [--check]       Write .grok/rules/zavet.md — the standing rules
+                              and decision index, as Grok Build project rules
+  zavet agents-md [--check]   Write the zavet block of ./AGENTS.md, for every
+                              harness with no session-start hook of its own
+  zavet context               Print the standing rules and decision index, for
+                              a SessionStart hook that can inject stdout
+  zavet hook <kind> [--flavor claude|grok|cursor]
+                              Run a guard hook over a harness event on stdin
+                              (guard-edit, guard-commit, refresh)
+  zavet adapters [--check] [--cursor]
+                              Refresh every cross-harness adapter in this repo:
+                              the vendored CLI, AGENTS.md, .grok/, and the git
+                              hook templates. --check reports drift, writes
+                              nothing, and exits 1 if anything is stale
+  zavet hooks [install|--check]
+                              Install the git-hook enforcement floor by
+                              pointing core.hooksPath at .zavet/githooks
+  zavet bin                   Print the resolved path of the zavet executable
+  zavet deny [--format claude|grok|cursor] <reason>
+                              Print a tool-denial envelope in one harness's
+                              shape (default claude)
   zavet emit <kind> <id> [file]
                               Fire a guard event to dira (silent no-op without dira)
   zavet version [--json]      Print the plugin version (bare, or as a JSON contract)
@@ -81,6 +111,62 @@ die() {
 script_dir() {
     # shellcheck disable=SC1007
     CDPATH= cd -- "$(dirname -- "$0")" && pwd
+}
+
+# ---------------------------------------------------------- vendored copy --
+#
+# Where a repo's own copy of this script lives, and how anything that is not a
+# Claude Code plugin hook finds it.
+#
+# `${CLAUDE_PLUGIN_ROOT}` only exists inside Claude Code, so every other
+# surface — the generated skills, the git hooks, the AGENTS.md instructions, CI
+# — needs a path that is true for a plain `git clone`. Vendoring one POSIX sh
+# file into the repo is the cheapest thing that is: no install step for
+# teammates on any harness, and CI needs nothing but a checkout.
+#
+# The plugin hooks deliberately do NOT use this order (see hooks/scripts/):
+# they resolve `${CLAUDE_PLUGIN_ROOT}` first, because plugin and script ship
+# together and their versions match by construction. Everything else prefers
+# the repo's copy, because that is the version the repo was checked in with.
+ZAVET_BIN_REL=".zavet/bin/zavet"
+
+zavet_bin_resolve() { # $1 = repo toplevel (optional)
+    if [ -n "${ZAVET_BIN:-}" ] && [ -x "$ZAVET_BIN" ]; then
+        printf '%s\n' "$ZAVET_BIN"
+        return 0
+    fi
+    if [ -n "${1:-}" ] && [ -x "$1/$ZAVET_BIN_REL" ]; then
+        printf '%s\n' "$1/$ZAVET_BIN_REL"
+        return 0
+    fi
+    _p=$(command -v zavet 2>/dev/null) && [ -n "$_p" ] && {
+        printf '%s\n' "$_p"
+        return 0
+    }
+    if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -x "$CLAUDE_PLUGIN_ROOT/bin/zavet" ]; then
+        printf '%s\n' "$CLAUDE_PLUGIN_ROOT/bin/zavet"
+        return 0
+    fi
+    return 1
+}
+
+cmd_bin() {
+    top=$(repo_toplevel) || top=""
+    zavet_bin_resolve "$top" || die "cannot resolve a zavet executable (tried \$ZAVET_BIN, $ZAVET_BIN_REL, PATH, \$CLAUDE_PLUGIN_ROOT)"
+}
+
+# Copy this script into the repo at $ZAVET_BIN_REL. Idempotent, and reports
+# whether anything changed so `adapters --check` can gate on it.
+vendor_bin() { # $1 = root
+    _src="$(script_dir)/zavet"
+    _dst="$1/$ZAVET_BIN_REL"
+    [ -f "$_src" ] || return 1
+    if [ -f "$_dst" ] && cmp -s "$_src" "$_dst"; then
+        return 0
+    fi
+    mkdir -p "$(dirname -- "$_dst")" || return 1
+    cp "$_src" "$_dst.tmp.$$" && chmod 755 "$_dst.tmp.$$" && mv "$_dst.tmp.$$" "$_dst" || return 1
+    return 2
 }
 
 # Read the "version" field out of the plugin manifest via sed/awk only — jq
@@ -214,6 +300,29 @@ zavet_prefix_set() { # $1 = root
 # The prefix set as an ERE alternation (`D|ZAVET`), for grep and awk.
 zavet_prefix_alt() { # $1 = root
     zavet_prefix_set "$1" | tr ' ' '|'
+}
+
+# The two trailer patterns the guard wall keys on, defined ONCE.
+#
+# `zavet check` (a commit range), `zavet gate` (a prospective commit) and the
+# git hook floor all test the same thing, and a repo that enforces one pattern
+# in CI and a subtly different one locally is worse than a repo enforcing
+# neither: the local pass teaches the agent a rule CI then rejects. These two
+# functions are why that cannot happen.
+#
+# A retired prefix still counts as compliance — records are append-only, so
+# ids minted under an old prefix keep it and their trailers stay valid forever.
+zavet_refs_re() { # $1 = root
+    printf '(Refs|Supersedes):[[:space:]]*%s' "$(zavet_id_re "$1")"
+}
+ZAVET_SPEC_RE='Spec:[[:space:]]*[a-z0-9][a-z0-9-]*'
+
+# A bare id, with no trailer keyword. Kept separate from zavet_refs_re because
+# the two are NOT interchangeable and the failure is silent: composing
+# `Supersedes:[[:space:]]*` with the full trailer pattern yields a regex that
+# demands the keyword twice, matches no real commit, and simply stops firing.
+zavet_id_re() { # $1 = root
+    printf '(%s)-[0-9]+' "$(zavet_prefix_alt "$1")"
 }
 
 # Width for a freshly scaffolded repo. Deliberately wider than the historical
@@ -821,7 +930,13 @@ cmd_init() {
         printf 'zavet: WARNING — %s is already used by %s next door; two repos sharing a prefix is the ambiguity prefixes exist to remove (zavet suggest lists alternatives)\n' \
             "$taken" "$repo" >&2
     done
-    printf 'zavet: next steps — edit RULES.md, then record your first decision (/zavet:decide)\n'
+    # The cross-harness layer is scaffolded at init, not left as an opt-in
+    # afterthought: a repo whose guards only bind the harness that happened to
+    # run `init` is exactly the gap this exists to close.
+    cmd_adapters >/dev/null || true
+    printf 'zavet: cross-harness adapters written (AGENTS.md, %s, %s)\n' \
+        "$ZAVET_GROK_RULES" "$ZAVET_GITHOOKS_DIR"
+    printf 'zavet: next steps — edit RULES.md, run "zavet hooks install", then record your first decision (/zavet:decide)\n'
 }
 
 # Print or change the prefix NEW ids are minted with.
@@ -1231,6 +1346,38 @@ cmd_spec_match() {
 # stdout (TSV): violation<TAB>sha7<TAB>ids<TAB>subject
 #               warn-spec<TAB>sha7<TAB>slugs<TAB>subject
 # stderr: human summary. Exit 1 iff violations.
+# A generated context file that no longer matches the records it summarizes.
+#
+# WARNING, never a violation. The file is derived, so it is always repairable by
+# rerunning one command, and failing a PR over a derived artifact trains people
+# to distrust the check. But it has to be said out loud: this file IS the
+# knowledge layer for every harness without a session-start hook, and a stale
+# decision index does not look stale — it looks authoritative. An agent reading
+# it will confidently cite a decision that was superseded three commits ago.
+#
+# Reported for files that EXIST. A repo that never ran `zavet adapters` has
+# opted out, and nagging it on every CI run is not this check's job (`zavet
+# audit` names it as adapter-missing, which is where that belongs).
+check_generated_context() { # $1 = root
+    _n=0
+    for _pair in "ctx_render_rules $ZAVET_GROK_RULES" "ctx_render_agents_md $ZAVET_AGENTS_MD"; do
+        _fn=${_pair%% *}
+        _rel=${_pair#* }
+        [ -f "$1/$_rel" ] || continue
+        _exp="${TMPDIR:-/tmp}/zavet-check-ctx.$$"
+        if "$_fn" "$1" >"$_exp" 2>/dev/null &&
+            ! diff -u "$1/$_rel" "$_exp" >/dev/null 2>&1; then
+            printf 'warn-generated\t%s\tstale\n' "$_rel"
+            _n=$((_n + 1))
+        fi
+        rm -f "$_exp"
+    done
+    [ "$_n" -eq 0 ] && return 0
+    printf 'zavet check: %s generated context file(s) are stale — run "zavet adapters" and commit (warning only; agents off Claude Code read these as the decision index).\n' \
+        "$_n" >&2
+    return 0
+}
+
 # Two records claiming one decision id.
 #
 # THE guarantee behind `next-id`'s best effort. Ids are chosen per branch from
@@ -1334,6 +1481,7 @@ cmd_check() {
         rc=0
         check_duplicate_ids || rc=1
         check_errata || rc=1
+        check_generated_context "$top"
         return "$rc"
     fi
     tab=$(printf '\t')
@@ -1349,15 +1497,14 @@ cmd_check() {
         rc=0
         check_duplicate_ids || rc=1
         check_errata || rc=1
+        check_generated_context "$top"
         return "$rc"
     fi
     # Commits already carrying a trailer never violate — their diffs are
-    # never even listed. Regexes verbatim from the guard-commit hook, with the
-    # prefix alternation built from this repo's config so a retired prefix in
-    # older commits still counts as compliance.
-    alt=$(zavet_prefix_alt "$top")
-    refs_set="$nl$(git rev-list --no-merges -E --grep="(Refs|Supersedes):[[:space:]]*($alt)-[0-9]+" "$@" --)$nl"
-    spec_set="$nl$(git rev-list --no-merges -E --grep='Spec:[[:space:]]*[a-z0-9][a-z0-9-]*' "$@" --)$nl"
+    # never even listed. The patterns come from zavet_refs_re / ZAVET_SPEC_RE,
+    # the same two `zavet gate` tests, so CI and the hooks cannot diverge.
+    refs_set="$nl$(git rev-list --no-merges -E --grep="$(zavet_refs_re "$top")" "$@" --)$nl"
+    spec_set="$nl$(git rev-list --no-merges -E --grep="$ZAVET_SPEC_RE" "$@" --)$nl"
     violations=0
     warnings=0
     for sha in $all; do
@@ -1409,11 +1556,163 @@ cmd_check() {
     # rather than surfacing them one merge at a time.
     check_duplicate_ids || rc=1
     check_errata || rc=1
+    check_generated_context "$top"
     [ "$rc" -eq 0 ] || return 1
     if [ "$warnings" -gt 0 ]; then
         printf 'zavet check: %s commit(s) touch spec-covered paths without a Spec: trailer (warning only — keep specs current).\n' "$warnings" >&2
     fi
     return 0
+}
+
+# THE guard wall over one PROSPECTIVE commit: the staged paths plus the message
+# it is about to carry.
+#
+# `zavet check` is the same rule over commits that already exist; this is the
+# rule over the commit that does not exist yet, which is the only moment the
+# agent can still be taught instead of corrected. Every enforcement surface
+# routes through here — the Claude Code, Grok Build and Cursor PreToolUse
+# hooks, and the `commit-msg` git hook that stands in for them on harnesses
+# with no hook API. That is the point: a repo must not enforce one rule in the
+# agent loop and a different one at `git commit`.
+#
+# Two checks, one shared parse:
+#
+#   Guard WALL   staged paths matching an active `guards:` glob must be
+#                referenced by `Refs:` (compliance) or `Supersedes:`
+#                (intentional replacement). Blocking.
+#   Spec NUDGE   staged paths a living spec covers should keep it current —
+#                stage the spec or carry a `Spec:` trailer. Fires once per
+#                spec per session when --session is given, then passes.
+#
+# stdout: the reason text, ready to hand to a model. Exit 1 == block, 0 == pass.
+# Fail-open on anything unexpected: a broken wall must never wedge a commit.
+cmd_gate() {
+    staged=""
+    have_paths=0
+    message=""
+    session=""
+    do_emit=0
+    want_guards=1
+    want_nudge=1
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --staged) have_paths=2; shift ;;
+            --paths-from)
+                [ $# -ge 2 ] || die "--paths-from needs a value"
+                if [ "$2" = "-" ]; then
+                    staged=$(cat)
+                else
+                    staged=$(cat -- "$2" 2>/dev/null) || staged=""
+                fi
+                have_paths=1
+                shift 2
+                ;;
+            --message)
+                [ $# -ge 2 ] || die "--message needs a value"
+                message=$2
+                shift 2
+                ;;
+            --message-file)
+                [ $# -ge 2 ] || die "--message-file needs a value"
+                # Absent or unreadable reads as an empty message, which is the
+                # conservative answer: an unreferenced commit, not a free pass.
+                message=$(cat -- "$2" 2>/dev/null) || message=""
+                shift 2
+                ;;
+            --session)
+                [ $# -ge 2 ] || die "--session needs a value"
+                session=$2
+                shift 2
+                ;;
+            --emit) do_emit=1; shift ;;
+            --guards-only) want_nudge=0; shift ;;
+            --nudge-only) want_guards=0; shift ;;
+            *) die "usage: zavet gate [--staged|--paths-from <f|->] [--message <text>|--message-file <f>] [--session <id>] [--emit] [--guards-only|--nudge-only]" ;;
+        esac
+    done
+    top=$(repo_toplevel) || return 0
+    [ -d "$top/$ZAVET_DIR" ] || return 0
+    if [ "$have_paths" = 2 ]; then
+        staged=$(cd -- "$top" 2>/dev/null && git diff --cached --name-only 2>/dev/null)
+    fi
+    [ -n "$staged" ] || return 0
+
+    nl='
+'
+    reasons=""
+    refs_re=$(zavet_refs_re "$top")
+    id_re=$(zavet_id_re "$top")
+
+    # --- Guard wall ---------------------------------------------------------
+    if [ "$want_guards" -eq 1 ]; then
+        guarded=$(printf '%s\n' "$staged" | (cd -- "$top" && cmd_match_batch 2>/dev/null) | tr '\n' ' ')
+        guarded=${guarded% }
+        if [ -n "$guarded" ]; then
+            if printf '%s' "$message" | grep -qE "$refs_re"; then
+                if [ "$do_emit" -eq 1 ]; then
+                    for id in $guarded; do
+                        cmd_emit guard_complied "$id" "" 2>/dev/null || true
+                    done
+                    if printf '%s' "$message" | grep -qE "Supersedes:[[:space:]]*$id_re"; then
+                        sup=$(printf '%s' "$message" | grep -oE "Supersedes:[[:space:]]*$id_re" | head -1 | grep -oE "$id_re")
+                        # shellcheck disable=SC2015
+                        [ -n "$sup" ] && cmd_emit decision_superseded "$sup" "" 2>/dev/null || true
+                    fi
+                fi
+            else
+                if [ "$do_emit" -eq 1 ]; then
+                    for id in $guarded; do
+                        cmd_emit guard_blocked "$id" "" 2>/dev/null || true
+                    done
+                fi
+                first=${guarded%% *}
+                # shellcheck disable=SC2016
+                reasons=$(printf 'Staged changes touch paths guarded by: %s. Reference the decision in the commit message with a trailer — `Refs: %s` if the change complies with it, or `Supersedes: %s` (after recording the replacement decision via /zavet:decide) if it intentionally replaces it.' \
+                    "$guarded" "$first" "$first")
+            fi
+        fi
+    fi
+
+    # --- Spec nudge ---------------------------------------------------------
+    # Satisfied by a `Spec:` trailer, by staging every covering spec file, or —
+    # with --session — by having already nudged for that spec this session.
+    if [ "$want_nudge" -eq 1 ]; then
+        covering=$(printf '%s\n' "$staged" | (cd -- "$top" && cmd_spec_match 2>/dev/null))
+        if [ -n "$covering" ] && ! printf '%s' "$message" | grep -qE "$ZAVET_SPEC_RE"; then
+            state=""
+            if [ -n "$session" ]; then
+                # The session id names a temp file — keep it to a safe charset.
+                _s=$(printf '%s' "$session" | sed 's/[^A-Za-z0-9_-]/_/g')
+                state="${TMPDIR:-/tmp}/zavet-spec-shown-${_s}"
+            fi
+            fresh=""
+            for slug in $covering; do
+                printf '%s\n' "$staged" | grep -qxF "$ZAVET_DIR/specs/$slug.md" && continue
+                if [ -n "$state" ]; then
+                    grep -qx "$slug" "$state" 2>/dev/null && continue
+                    printf '%s\n' "$slug" >>"$state" 2>/dev/null || true
+                fi
+                fresh="$fresh $slug"
+            done
+            fresh=${fresh# }
+            if [ -n "$fresh" ]; then
+                firstspec=${fresh%% *}
+                # shellcheck disable=SC2016
+                nudge=$(printf 'Staged changes touch paths covered by spec(s): %s (see %s/specs/). Keep the living spec current: update the sections your change affects (and its decisions/date), stage the spec file with this commit, and add a `Spec: %s` trailer. If the spec truly needs no update, just add the trailer.' \
+                    "$fresh" "$ZAVET_DIR" "$firstspec")
+                [ -z "$state" ] || nudge="$nudge This reminder fires once per session."
+                if [ -n "$reasons" ]; then
+                    reasons="${reasons}${nl}${nl}${nudge}"
+                else
+                    reasons=$nudge
+                fi
+            fi
+        fi
+    fi
+
+    [ -n "$reasons" ] || return 0
+    printf '%s\n' "$reasons"
+    return 1
 }
 
 cmd_decision_path() {
@@ -1503,6 +1802,41 @@ EOF
         [ "$n" -gt 0 ] || continue
         printf 'stale-spec\t%s\t%s\t%s\n' "$slug" "$n" "$(git -C "$root" rev-parse --short "$last")"
     done
+
+    # --- cross-harness health: whether the knowledge layer actually reaches
+    # agents that are not Claude Code, and whether the enforcement floor is
+    # live. Every failure here is silent by nature — a stale decision index
+    # reads as authoritative, a missing one reads as "this repo has no
+    # decisions", and an inactive hook floor looks exactly like a compliant
+    # one until someone commits over a guard. So they are reported rather than
+    # left to be noticed.
+    for _pair in "ctx_render_rules $ZAVET_GROK_RULES" "ctx_render_agents_md $ZAVET_AGENTS_MD"; do
+        _fn=${_pair%% *}
+        _rel=${_pair#* }
+        if [ ! -f "$root/$_rel" ]; then
+            printf 'adapter-missing\t%s\trun: zavet adapters\n' "$_rel"
+            continue
+        fi
+        _exp="${TMPDIR:-/tmp}/zavet-audit-ctx.$$"
+        if "$_fn" "$root" >"$_exp" 2>/dev/null &&
+            ! diff -u "$root/$_rel" "$_exp" >/dev/null 2>&1; then
+            printf 'adapter-stale\t%s\trun: zavet adapters\n' "$_rel"
+        fi
+        rm -f "$_exp"
+        # Grok's rules discovery honors .gitignore; an ignored file is invisible
+        # to the harness it exists for, on every machine.
+        if (cd -- "$root" && git check-ignore -q "$_rel" 2>/dev/null); then
+            printf 'adapter-ignored\t%s\tgitignored — the harness never reads it\n' "$_rel"
+        fi
+    done
+    _hp=$(git -C "$root" config --get core.hooksPath 2>/dev/null) || _hp=""
+    if [ -f "$root/$ZAVET_GITHOOKS_DIR/commit-msg" ] && [ "$_hp" != "$ZAVET_GITHOOKS_DIR" ]; then
+        if [ -n "$_hp" ]; then
+            printf 'githook-floor\tinactive\tcore.hooksPath=%s (another tool owns it — delegate manually)\n' "$_hp"
+        else
+            printf 'githook-floor\tinactive\trun: zavet hooks install\n'
+        fi
+    fi
 
     [ -n "$guards_table" ] || return 0
 
@@ -1698,6 +2032,724 @@ cmd_index() {
         rm -f "$blockfile"
     fi
     printf 'zavet: index updated\n'
+    # The generated agent-context files carry the same index, so they go stale
+    # the moment it changes. Refreshing them here means every path that records
+    # a decision refreshes them too, and no command has to remember to.
+    #
+    # Only files that already exist are refreshed: `zavet index` must not
+    # conjure an AGENTS.md into a repo that never asked for one. `zavet
+    # adapters` is what opts a repo in.
+    for _pair in "ctx_render_rules $ZAVET_GROK_RULES" "ctx_render_agents_md $ZAVET_AGENTS_MD"; do
+        _fn=${_pair%% *}
+        _rel=${_pair#* }
+        [ -f "$root/$_rel" ] || continue
+        ctx_write "$_fn" "$root" "$_rel" || continue
+        printf 'zavet: refreshed %s\n' "$_rel"
+    done
+}
+
+# ------------------------------------------------- generated agent context --
+#
+# What the SessionStart hook injects on Claude Code, as a FILE, for every
+# harness that has no way to inject it.
+#
+# Claude Code is the only harness whose session-start hook can put text into
+# the conversation. Grok Build has the event but discards its stdout
+# (xai-grok-hooks parses additional_context for Stop only); nothing else has
+# the event at all. So the payload has to arrive as something the harness reads
+# on its own — Grok's project rules, or AGENTS.md — which means it is generated
+# and can go stale, and staleness in a decision index is worse than absence: it
+# reads as authoritative.
+#
+# Three writers keep it current, so no single one is load-bearing: `zavet
+# index` (below), a SessionStart hook, and a PostToolUse hook on .zavet/ edits.
+# `zavet check` reports drift, so CI catches a repo that stopped regenerating.
+
+# The payload itself — one builder, so the two files and the hook cannot
+# disagree about what this repo has decided.
+ctx_payload() { # $1 = root, $2 = "hook" | "file"
+    _root=$1
+    # `_ctxmode`, not `_mode`: this function calls cmd_list/cmd_specs, which
+    # assign `_mode` themselves. They happen to run inside `$( )` today, so the
+    # assignment cannot leak back — but that is a property of the call sites,
+    # not of the name, and the guard section below would vanish silently the day
+    # one of them is called without a subshell.
+    _ctxmode=$2
+    if [ -f "$_root/$ZAVET_DIR/RULES.md" ]; then
+        printf '### Standing rules\n\n'
+        # RULES.md is also a document in its own right, so it opens with its own
+        # `# Standing rules` heading. Embedded here that heading is both a
+        # duplicate of the one above and an H1 in the middle of a file, which
+        # ends the section every following heading was meant to sit inside.
+        # Drop a leading top-level heading and the blank line after it; a
+        # RULES.md that starts straight into prose is passed through untouched.
+        awk 'NR == 1 && /^# / { skip = 1; next }
+             skip && NF == 0 { skip = 0; next }
+             { skip = 0; print }' "$_root/$ZAVET_DIR/RULES.md"
+        printf '\n'
+    fi
+    _decisions=$(cd -- "$_root" && cmd_list 2>/dev/null)
+    if [ -n "$_decisions" ]; then
+        printf '### Recorded decisions (read the file before changing guarded code; ask /zavet:why)\n\n'
+        printf '%s\n' "$_decisions" | sort | awk -F '\t' '{
+            line = "- " $1
+            if ($3 != "") line = line " — " $3
+            line = line " (" $2 ")"
+            print line
+        }'
+    fi
+    _specs=$(cd -- "$_root" && cmd_specs 2>/dev/null)
+    if [ -n "$_specs" ]; then
+        printf '\n### Living specs (%s/specs/ — keep current while you work)\n\n' "$ZAVET_DIR"
+        printf '%s\n' "$_specs" | sort | awk -F '\t' '{
+            line = "- " $1
+            if ($5 != "") line = line " — " $5
+            print line " (" $2 ", " $3 ")"
+        }'
+    fi
+    printf '\nCapture bar: record non-obvious choices a future reader could not reconstruct — micro-decisions as commit trailers (Why:/Rejected:/Constraint:/Refs:), structural ones via /zavet:decide.\n'
+    # shellcheck disable=SC2016
+    printf 'Spec maintenance (do this as part of normal work, no command needed): when implementing or changing a feature, update its covering spec in %s/specs/ — or create one from %s/.spec-template.md (origin: session) for substantial new features — reference the decisions involved, and add a `Spec: <slug>` trailer to the commit.\n' \
+        "$ZAVET_DIR" "$ZAVET_DIR"
+    # Only the file form says this. On Claude Code and Grok Build a guarded edit
+    # is denied and the record shown, so telling the agent to go look would be
+    # noise; everywhere else nothing stops it, and checking by hand is the only
+    # thing standing between it and silently contradicting a decision.
+    if [ "$_ctxmode" = "file" ]; then
+        printf '\n### Guards are not enforced by every harness\n\n'
+        # shellcheck disable=SC2016
+        printf 'Before you edit a file, run `%s match <path>` (repo-relative). If it prints\n' "$ZAVET_BIN_REL"
+        printf 'decision ids, open each record and honor it — or supersede it explicitly via\n'
+        printf '/zavet:decide. Never work around a guard by re-wording the change.\n'
+    fi
+}
+
+ZAVET_GROK_RULES=".grok/rules/zavet.md"
+ZAVET_AGENTS_MD="AGENTS.md"
+MARK_AGENTS_START="<!-- zavet:agents:start -->"
+MARK_AGENTS_END="<!-- zavet:agents:end -->"
+
+# Both generated files are RENDERED to stdout and only then written, so
+# `--check` is a diff against the same bytes a write would produce. A checker
+# that re-derived the expected content by a second path would be a second
+# implementation to drift.
+
+# Grok Build project rules — a whole file zavet owns, so there is no user prose
+# to preserve and no marker surgery.
+#
+# Grok re-reads project rules from disk on every prompt build, on compaction and
+# on model switch (acp_session_impl/prompt_build.rs), so a rewrite lands inside
+# the running session. That is what makes this equal to Claude Code's injection
+# rather than a lesser substitute — better, in fact: Claude's is frozen at
+# session start and this one is not.
+ctx_render_rules() { # $1 = root
+    # shellcheck disable=SC2016
+    printf '<!-- generated by `zavet rules` — do not edit; edit %s/RULES.md instead -->\n\n' "$ZAVET_DIR"
+    printf '# Zavet knowledge layer (this repo records decisions in %s/)\n\n' "$ZAVET_DIR"
+    ctx_payload "$1" file
+}
+
+# The zavet section of AGENTS.md, for every harness that reads AGENTS.md and has
+# no session-start hook of its own — Codex, Cursor, Gemini CLI, OpenCode,
+# Copilot, Amp, Factory and the rest.
+ctx_render_agents_block() { # $1 = root
+    printf '\n## Zavet knowledge layer (this repo records decisions in %s/)\n\n' "$ZAVET_DIR"
+    # shellcheck disable=SC2016
+    printf 'This block is generated by `zavet agents-md`; edit %s/RULES.md and the\n' "$ZAVET_DIR"
+    printf 'records themselves, never this text. On Claude Code and Grok Build the same\n'
+    printf 'content arrives live at session start — if you are on one of those, this is a\n'
+    printf 'duplicate, not a second and conflicting instruction.\n\n'
+    ctx_payload "$1" file
+}
+
+# The whole expected AGENTS.md: the block substituted into whatever is there
+# now, with everything outside the markers preserved verbatim. A file with no
+# markers yet gets them appended, which is also how a repo predating this
+# feature picks it up; an absent file is created with a minimal heading.
+ctx_render_agents_md() { # $1 = root
+    _f="$1/$ZAVET_AGENTS_MD"
+    _blk="${TMPDIR:-/tmp}/zavet-agents-block.$$"
+    ctx_render_agents_block "$1" >"$_blk"
+    _cur="${TMPDIR:-/tmp}/zavet-agents-cur.$$"
+    if [ -f "$_f" ]; then
+        cat -- "$_f" >"$_cur"
+    else
+        printf '# Agent instructions\n' >"$_cur"
+    fi
+    if ! grep -qF "$MARK_AGENTS_START" "$_cur" 2>/dev/null; then
+        printf '\n%s\n%s\n' "$MARK_AGENTS_START" "$MARK_AGENTS_END" >>"$_cur"
+    fi
+    awk -v start="$MARK_AGENTS_START" -v end="$MARK_AGENTS_END" -v blockfile="$_blk" '
+        $0 == start {
+            print
+            while ((getline line < blockfile) > 0) print line
+            skipping = 1
+            next
+        }
+        $0 == end { skipping = 0; print; next }
+        !skipping { print }
+    ' "$_cur"
+    rm -f "$_blk" "$_cur"
+}
+
+# Render, then move into place. Silent — the implicit refresh from `zavet index`
+# uses this, and a decision recorded in a read-only checkout must not make
+# `/zavet:decide` look like it failed.
+ctx_write() { # $1 = renderer, $2 = root, $3 = repo-relative path
+    _t="${TMPDIR:-/tmp}/zavet-ctxw.$$"
+    "$1" "$2" >"$_t" 2>/dev/null || { rm -f "$_t"; return 1; }
+    mkdir -p "$(dirname -- "$2/$3")" 2>/dev/null || { rm -f "$_t"; return 1; }
+    mv "$_t" "$2/$3" 2>/dev/null || { rm -f "$_t"; return 1; }
+}
+
+# Grok's rules discovery honors .gitignore (unlike its skill discovery, which
+# deliberately does not), so an ignored rules file is not a local-only
+# convenience — it is invisible to the harness it was written for, silently,
+# on every machine including the one that generated it.
+ctx_warn_ignored() { # $1 = root, $2 = repo-relative path
+    [ "$2" = "$ZAVET_GROK_RULES" ] || return 0
+    (cd -- "$1" && git check-ignore -q "$2" 2>/dev/null) || return 0
+    printf 'zavet: WARNING — %s is gitignored, and Grok Build skips ignored rules files. Commit it, or Grok sees no decision index at all.\n' \
+        "$2" >&2
+}
+
+# `zavet rules` / `zavet agents-md`. Bare form writes; --check diffs and writes
+# nothing, exiting 1 on drift so CI can gate on it. An absent file is drift.
+ctx_cmd() { # $1 = command name, $2 = renderer, $3 = repo-relative path, $4... = flags
+    _name=$1
+    _fn=$2
+    _rel=$3
+    shift 3
+    case "${1:-}" in
+        --check) _check=1 ;;
+        "") _check=0 ;;
+        *) die "usage: zavet $_name [--check]" ;;
+    esac
+    root=$(zavet_root)
+    if [ "$_check" -eq 1 ]; then
+        _new="${TMPDIR:-/tmp}/zavet-$_name-check.$$"
+        "$_fn" "$root" >"$_new" || { rm -f "$_new"; die "cannot render $_rel"; }
+        _rc=0
+        if ! diff -u "$root/$_rel" "$_new" >/dev/null 2>&1; then
+            printf 'zavet: %s is stale — run "zavet %s" and commit the result\n' "$_rel" "$_name" >&2
+            _rc=1
+        fi
+        rm -f "$_new"
+        return "$_rc"
+    fi
+    ctx_write "$_fn" "$root" "$_rel" || die "cannot write $_rel"
+    printf 'zavet: wrote %s\n' "$_rel"
+    ctx_warn_ignored "$root" "$_rel"
+}
+
+cmd_rules() { ctx_cmd rules ctx_render_rules "$ZAVET_GROK_RULES" "$@"; }
+cmd_agents_md() { ctx_cmd agents-md ctx_render_agents_md "$ZAVET_AGENTS_MD" "$@"; }
+
+# The SessionStart payload, on stdout, for the one harness that can inject it.
+# Same builder as the two generated files, so what Claude Code is told at
+# session start and what everyone else reads from disk cannot drift.
+cmd_context() {
+    top=$(repo_toplevel) || return 0
+    [ -d "$top/$ZAVET_DIR" ] || return 0
+    printf '## Zavet knowledge layer (this repo records decisions in %s/)\n\n' "$ZAVET_DIR"
+    ctx_payload "$top" hook
+}
+
+# ------------------------------------------------------------------- hooks --
+#
+# The guard hooks themselves, as subcommands, so ONE vendored file serves every
+# harness.
+#
+# The logic used to live in hooks/scripts/*.sh, which is fine while Claude Code
+# is the only consumer: the plugin ships the scripts next to the manifest that
+# names them. Off Claude Code there is no plugin, so a `.grok/hooks/zavet.json`
+# pointing at those scripts would point at nothing. Vendoring three more shell
+# files to fix that trades one problem for three; folding them in here means the
+# single file `zavet adapters` already vendors is the whole implementation, and
+# `hooks/scripts/*.sh` become two-line wrappers that keep the plugin manifest
+# working unchanged.
+#
+# Every path fails OPEN. A guard that wedges the agent loop gets uninstalled,
+# and an uninstalled guard protects nothing.
+
+# First non-empty jq expression wins. The same field has a different name in
+# every harness — Claude's envelope is snake_case (`.tool_input.file_path`),
+# Grok's is camelCase around a snake_case tool input (`.toolInput.file_path`) —
+# so rather than branch per flavor for reads, try the spellings in order. Reads
+# are safe to guess at; WRITES are not, which is why the deny envelope is
+# chosen by explicit flavor instead (see cmd_deny).
+hook_field() { # $1 = json, $2... = jq expressions
+    _json=$1
+    shift
+    for _e in "$@"; do
+        _v=$(printf '%s' "$_json" | jq -r "$_e // empty" 2>/dev/null) || continue
+        [ -n "$_v" ] || continue
+        printf '%s' "$_v"
+        return 0
+    done
+    return 1
+}
+
+# Which harness is calling.
+#
+# Not cosmetic: it decides the deny envelope, and a wrong guess is a silent
+# ALLOW rather than a visible error. Grok reads `.claude/settings.json` and
+# `.cursor/hooks.json` as well as its own config, so a script cannot infer the
+# caller from which config registered it — it has to look at the call.
+#
+# `GROK_HOOK_EVENT` is set by Grok's runner on every hook process, which makes
+# it the one signal that is both cheap and certain. An explicit --flavor from a
+# generated config wins over everything, because that config knows what wrote it.
+hook_flavor() { # $1 = json, $2 = explicit flavor or ""
+    if [ -n "${2:-}" ]; then
+        printf '%s' "$2"
+        return 0
+    fi
+    if [ -n "${GROK_HOOK_EVENT:-}" ]; then
+        printf 'grok'
+        return 0
+    fi
+    if printf '%s' "$1" | jq -e 'has("hookEventName") or has("toolInput")' >/dev/null 2>&1; then
+        printf 'grok'
+        return 0
+    fi
+    printf 'claude'
+}
+
+# Resolve a tool-supplied file path to the repo that owns it, physically.
+#
+# Walks up to the nearest existing ancestor so a Write to a not-yet-created
+# file still resolves, then takes `pwd -P` because git reports physical
+# toplevels and macOS hands out /tmp when it means /private/tmp. Prints
+# "root<TAB>relpath" or fails.
+hook_resolve_path() { # $1 = file path
+    _p=$1
+    _suffix=""
+    while [ ! -d "$_p" ]; do
+        _parent=$(dirname -- "$_p")
+        [ "$_parent" = "$_p" ] && return 1
+        _suffix="/$(basename -- "$_p")$_suffix"
+        _p=$_parent
+    done
+    _phys=$(cd -- "$_p" 2>/dev/null && pwd -P) || return 1
+    _file="$_phys$_suffix"
+    _root=$(cd -- "$_phys" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || return 1
+    [ -n "$_root" ] || return 1
+    [ -d "$_root/$ZAVET_DIR" ] || return 1
+    case "$_file" in
+        "$_root"/*) printf '%s\t%s\n' "$_root" "${_file#"$_root"/}" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Injection budget, in lines of record body.
+#
+# Guards stack: a file at the centre of a subsystem can carry three records, and
+# dumping all three whole spends hundreds of lines at the exact moment attention
+# is scarcest. Over budget (or whenever more than one record matches) each
+# record collapses to its directives — the actionable part — with the path to
+# read the rest on demand. A single record under budget is still shown whole,
+# so the common case is unchanged.
+ZAVET_GUARD_BUDGET=120
+
+# Teach-before-change: the first time this session that a guarded path is
+# touched, deny once and return the record as the reason. The agent reads it and
+# retries informed; later edits under the same decision pass silently.
+hook_guard_edit() { # $1 = json, $2 = flavor
+    _file=$(hook_field "$1" '.tool_input.file_path' '.tool_input.notebook_path' \
+        '.toolInput.file_path' '.toolInput.notebook_path' '.toolInput.path' \
+        '.file_path' '.path') || return 0
+    _session=$(hook_field "$1" '.session_id' '.sessionId' '.conversation_id') || _session="nosession"
+    # The session id names a temp file — keep it to a safe charset.
+    _session=$(printf '%s' "$_session" | sed 's/[^A-Za-z0-9_-]/_/g')
+
+    _rp=$(hook_resolve_path "$_file") || return 0
+    _tab=$(printf '\t')
+    _root=${_rp%%"$_tab"*}
+    _rel=${_rp#*"$_tab"}
+
+    _matches=$(cd -- "$_root" && cmd_match "$_rel" 2>/dev/null)
+    [ -n "$_matches" ] || return 0
+
+    _state="${TMPDIR:-/tmp}/zavet-shown-${_session}"
+    _fresh=""
+    for _id in $_matches; do
+        grep -qx "$_id" "$_state" 2>/dev/null && continue
+        _fresh="$_fresh $_id"
+    done
+    # Everything relevant was already shown this session: allow silently.
+    [ -n "${_fresh# }" ] || return 0
+
+    _total=0
+    _n=0
+    for _id in $_fresh; do
+        _n=$((_n + 1))
+        _p=$(cd -- "$_root" && cmd_decision_path "$_id" 2>/dev/null) || continue
+        _c=$(wc -l <"$_root/$_p" 2>/dev/null) || continue
+        _total=$((_total + _c))
+    done
+    _full=1
+    [ "$_n" -le 1 ] || _full=0
+    [ "$_total" -le "$ZAVET_GUARD_BUDGET" ] || _full=0
+
+    # One errata/list read for the whole loop: id<TAB>corrected-by, id<TAB>title.
+    _errata=$(cd -- "$_root" && cmd_errata 2>/dev/null) || _errata=""
+    _titles=$(cd -- "$_root" && cmd_list 2>/dev/null) || _titles=""
+
+    _reason=""
+    for _id in $_fresh; do
+        printf '%s\n' "$_id" >>"$_state" 2>/dev/null || true
+        (cd -- "$_root" && cmd_emit guard_shown "$_id" "$_rel") 2>/dev/null || true
+        _path=$(cd -- "$_root" && cmd_decision_path "$_id" 2>/dev/null) || continue
+
+        # A correction is louder than the record: a reader who stops before it
+        # leaves with a claim its own author has documented as wrong.
+        _fixed=$(printf '%s\n' "$_errata" | awk -F'\t' -v i="$_id" '$1 == i { print $2; exit }')
+        _banner=""
+        [ -z "$_fixed" ] || _banner=$(printf '\n!! CORRECTED BY %s — one claim in this record is wrong. Read %s too.' "$_fixed" "$_fixed")
+
+        if [ "$_full" -eq 1 ]; then
+            _body=$(cat -- "$_root/$_path" 2>/dev/null) || continue
+            _reason=$(printf '%s\n\n=== %s guards %s (%s) ===%s\n%s' "$_reason" "$_id" "$_rel" "$_path" "$_banner" "$_body")
+        else
+            _title=$(printf '%s\n' "$_titles" | awk -F'\t' -v i="$_id" '$1 == i { print $3; exit }')
+            _dir=$(cd -- "$_root" && cmd_section "$_id" "Agent directives" 2>/dev/null)
+            [ -n "$_dir" ] || _dir="  (no ## Agent directives section — read the record)"
+            _reason=$(printf '%s\n\n=== %s · %s ===\n%s%s\n%s\n(directives only — read %s for the reasoning)' \
+                "$_reason" "$_id" "$_title" "$_banner" "${_banner:+
+}" "$_dir" "$_path")
+        fi
+    done
+
+    if [ "$_full" -eq 1 ]; then
+        _lead='This path is guarded by recorded decision(s) you have not seen this session. Read them, honor their constraints (or supersede them via /zavet:decide), then retry the edit — it will be allowed.'
+    else
+        _lead='This path is guarded by several recorded decisions you have not seen this session. Their DIRECTIVES are below; each record path is named if you need the reasoning. Honor them (or supersede via /zavet:decide), then retry the edit — it will be allowed.'
+    fi
+    cmd_deny --format "$2" "$(printf '%s\n%s' "$_lead" "$_reason")"
+    return 0
+}
+
+# The guard wall on `git commit`, delegated wholesale to `zavet gate` so the
+# live hook and the commit-msg git hook enforce one rule.
+hook_guard_commit() { # $1 = json, $2 = flavor
+    _cmd=$(hook_field "$1" '.tool_input.command' '.toolInput.command' '.command') || return 0
+    # The cheap gate first — the overwhelming majority of shell calls exit here.
+    # "commit" must appear as a standalone token in a `git …` segment, which
+    # admits `git -C . commit` while `git log --grep=commit` passes untouched.
+    printf '%s\n' "$_cmd" |
+        grep -qE '(^|[;&|[:space:]])git[[:space:]]([^;&|]*[[:space:]])?commit([[:space:]]|$)' || return 0
+    _cwd=$(hook_field "$1" '.cwd' '.workspaceRoot' '.workspace_roots[0]') || _cwd="."
+    [ -d "$_cwd" ] || _cwd="."
+    _session=$(hook_field "$1" '.session_id' '.sessionId' '.conversation_id') || _session="nosession"
+
+    _reason=$(cd -- "$_cwd" 2>/dev/null && cmd_gate --staged --message "$_cmd" --session "$_session" --emit) && return 0
+    [ -n "$_reason" ] || return 0
+    cmd_deny --format "$2" "$_reason
+
+Then retry the commit."
+    return 0
+}
+
+# ---------------------------------------------------------------- adapters --
+#
+# Everything a repo needs so zavet works on a harness that is not Claude Code.
+#
+# Deliberately NOT the skills: those are published as Agent Skills and installed
+# by `npx skills`, which already solves multi-agent detection, symlink-vs-copy
+# for Windows, project-vs-global scope, and updates across ~76 harnesses. This
+# command covers only what that installer cannot — a binary the repo can reach,
+# instructions the repo carries, and enforcement wiring.
+#
+# Everything written here is generated and safe to delete; `--check` reports
+# drift without writing, for CI.
+
+ZAVET_GROK_HOOKS=".grok/hooks/zavet.json"
+ZAVET_CURSOR_HOOKS=".cursor/hooks.json"
+ZAVET_GITHOOKS_DIR=".zavet/githooks"
+
+# Grok Build hook config.
+#
+# Native `.grok/` rather than writing zavet into `.claude/settings.json`, which
+# Grok also reads: that file is how a Claude Code user configures Claude Code,
+# and adding hooks to it would fire them a second time alongside the plugin's
+# own. Two denials for one edit is not twice the safety, it is a bug report.
+#
+# `--flavor grok` is passed explicitly. Detection would work here, but the
+# config knows what generated it, and an explicit flavor cannot be wrong.
+ctx_render_grok_hooks() { # $1 = root
+    cat <<EOF
+{
+  "_generated": "by \`zavet adapters\` — do not edit; re-run zavet adapters",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "$ZAVET_BIN_REL hook refresh", "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "search_replace",
+        "hooks": [
+          { "type": "command", "command": "$ZAVET_BIN_REL hook refresh", "timeout": 10 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "search_replace",
+        "hooks": [
+          { "type": "command", "command": "$ZAVET_BIN_REL hook guard-edit --flavor grok", "timeout": 10 }
+        ]
+      },
+      {
+        "matcher": "run_terminal_command",
+        "hooks": [
+          { "type": "command", "command": "$ZAVET_BIN_REL hook guard-commit --flavor grok", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
+EOF
+}
+
+# Cursor hook config.
+#
+# `beforeShellExecution` is documented as able to deny, so the commit wall is
+# solid. `preToolUse` is listed as an agent hook but Cursor's docs do not state
+# that it can deny an edit — it is wired here because if it can, the guard works
+# exactly as on Claude Code and Grok Build, and if it cannot, the hook is a
+# no-op and the git-hook floor is what holds. Not claimed as working in the
+# README until someone confirms it against a real Cursor build.
+ctx_render_cursor_hooks() { # $1 = root
+    cat <<EOF
+{
+  "_generated": "by \`zavet adapters --cursor\` — do not edit; re-run zavet adapters",
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      { "command": "$ZAVET_BIN_REL hook guard-commit --flavor cursor" }
+    ],
+    "preToolUse": [
+      { "command": "$ZAVET_BIN_REL hook guard-edit --flavor cursor" }
+    ]
+  }
+}
+EOF
+}
+
+# The git-hook floor, for every harness with no hook API at all.
+#
+# commit-msg carries the guard wall because that is the first moment the message
+# exists — a pre-commit hook would have to guess at it. pre-commit carries the
+# spec nudge and NEVER fails: the once-per-session suppression the live hooks
+# rely on has no git equivalent, so a blocking nudge would fire on every single
+# commit and get bypassed with --no-verify within a day.
+ctx_render_githook_commit_msg() { # $1 = root
+    cat <<EOF
+#!/bin/sh
+# generated by \`zavet adapters\` — do not edit; re-run zavet adapters
+#
+# The guard wall, for harnesses with no hook API. Same rule as the live hooks
+# and as \`zavet check\` in CI: one implementation, in \`zavet gate\`.
+set -u
+[ -x "\$(dirname -- "\$0")/../bin/zavet" ] || exit 0
+reason=\$("\$(dirname -- "\$0")/../bin/zavet" gate --staged --message-file "\$1" --guards-only) && exit 0
+[ -n "\$reason" ] || exit 0
+printf 'zavet: commit blocked by the guard wall.\\n\\n%s\\n\\n' "\$reason" >&2
+printf 'Add the trailer to your commit message and commit again.\\n' >&2
+exit 1
+EOF
+}
+
+ctx_render_githook_pre_commit() { # $1 = root
+    cat <<EOF
+#!/bin/sh
+# generated by \`zavet adapters\` — do not edit; re-run zavet adapters
+#
+# Spec-currency nudge. WARN ONLY, always exit 0 — see zavet adapters.
+set -u
+[ -x "\$(dirname -- "\$0")/../bin/zavet" ] || exit 0
+reason=\$("\$(dirname -- "\$0")/../bin/zavet" gate --staged --nudge-only) && exit 0
+[ -n "\$reason" ] || exit 0
+printf 'zavet: %s\\n' "\$reason" >&2
+exit 0
+EOF
+}
+
+# One table drives write, --check and the summary, so a new adapter cannot be
+# added to one and forgotten in the others.
+#
+# Fields: renderer<TAB>repo-relative path<TAB>mode<TAB>optional
+adapters_table() { # $1 = want_cursor
+    printf 'ctx_render_agents_md\t%s\t644\t0\n' "$ZAVET_AGENTS_MD"
+    printf 'ctx_render_rules\t%s\t644\t0\n' "$ZAVET_GROK_RULES"
+    printf 'ctx_render_grok_hooks\t%s\t644\t0\n' "$ZAVET_GROK_HOOKS"
+    printf 'ctx_render_githook_commit_msg\t%s/commit-msg\t755\t0\n' "$ZAVET_GITHOOKS_DIR"
+    printf 'ctx_render_githook_pre_commit\t%s/pre-commit\t755\t0\n' "$ZAVET_GITHOOKS_DIR"
+    [ "$1" -eq 1 ] && printf 'ctx_render_cursor_hooks\t%s\t644\t1\n' "$ZAVET_CURSOR_HOOKS"
+    return 0
+}
+
+cmd_adapters() {
+    _check=0
+    _cursor=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --check) _check=1; shift ;;
+            --cursor) _cursor=1; shift ;;
+            *) die "usage: zavet adapters [--check] [--cursor]" ;;
+        esac
+    done
+    root=$(zavet_root)
+    # An existing .cursor/hooks.json means the repo already opted in; keep
+    # refreshing it without needing the flag every time.
+    [ -f "$root/$ZAVET_CURSOR_HOOKS" ] && _cursor=1
+    _tab=$(printf '\t')
+    _stale=0
+    _wrote=0
+
+    # The vendored CLI first: every other artifact names it.
+    if [ "$_check" -eq 1 ]; then
+        if [ ! -f "$root/$ZAVET_BIN_REL" ] || ! cmp -s "$(script_dir)/zavet" "$root/$ZAVET_BIN_REL"; then
+            printf 'zavet: %s is missing or stale — run "zavet adapters"\n' "$ZAVET_BIN_REL" >&2
+            _stale=1
+        fi
+    else
+        vendor_bin "$root"
+        case $? in
+            2) printf 'zavet: vendored %s (%s)\n' "$ZAVET_BIN_REL" "$(plugin_version)"; _wrote=1 ;;
+            0) ;;
+            *) die "cannot vendor $ZAVET_BIN_REL" ;;
+        esac
+    fi
+
+    # `_perm`, not `_mode`: POSIX sh has no locals, and `ctx_payload` — reached
+    # through ctx_write -> renderer, all in this same shell — assigns `_mode` for
+    # its own purposes. Naming them alike made `chmod` run with the string
+    # "file" as its mode, silently, swallowed by the `|| true`.
+    while IFS="$_tab" read -r _fn _rel _perm _opt; do
+        [ -n "$_fn" ] || continue
+        if [ "$_check" -eq 1 ]; then
+            _new="${TMPDIR:-/tmp}/zavet-adapt-check.$$"
+            "$_fn" "$root" >"$_new" 2>/dev/null || { rm -f "$_new"; continue; }
+            if ! diff -u "$root/$_rel" "$_new" >/dev/null 2>&1; then
+                printf 'zavet: %s is missing or stale — run "zavet adapters"\n' "$_rel" >&2
+                _stale=1
+            fi
+            rm -f "$_new"
+            continue
+        fi
+        ctx_write "$_fn" "$root" "$_rel" || die "cannot write $_rel"
+        chmod "$_perm" "$root/$_rel" 2>/dev/null || die "cannot chmod $_rel"
+        printf 'zavet: wrote %s\n' "$_rel"
+        _wrote=1
+        ctx_warn_ignored "$root" "$_rel"
+    done <<EOF
+$(adapters_table "$_cursor")
+EOF
+
+    if [ "$_check" -eq 1 ]; then
+        [ "$_stale" -eq 0 ] || return 1
+        printf 'zavet: adapters up to date\n'
+        return 0
+    fi
+    [ "$_wrote" -eq 1 ] || printf 'zavet: adapters already up to date\n'
+    # The git hooks exist now but do nothing until core.hooksPath points at
+    # them. Saying so beats a floor everyone believes is installed.
+    if ! githooks_installed "$root"; then
+        printf 'zavet: next step — "zavet hooks install" to activate the git-hook floor (%s)\n' \
+            "$ZAVET_GITHOOKS_DIR"
+    fi
+}
+
+githooks_installed() { # $1 = root
+    _hp=$(cd -- "$1" && git config --get core.hooksPath 2>/dev/null) || return 1
+    [ "$_hp" = "$ZAVET_GITHOOKS_DIR" ]
+}
+
+# Activate the git-hook floor.
+#
+# Refuses to take over a core.hooksPath that already points somewhere else.
+# Husky, lefthook and pre-commit all own that setting, and silently
+# repointing it would disable every hook a repo already depends on to install
+# one it merely wants.
+cmd_hooks() {
+    case "${1:-}" in
+        install | "") _mode=install ;;
+        --check) _mode=check ;;
+        *) die "usage: zavet hooks [install|--check]" ;;
+    esac
+    root=$(zavet_root)
+    _hp=$(cd -- "$root" && git config --get core.hooksPath 2>/dev/null) || _hp=""
+    if [ "$_mode" = check ]; then
+        if githooks_installed "$root"; then
+            printf 'zavet: git-hook floor active (core.hooksPath=%s)\n' "$ZAVET_GITHOOKS_DIR"
+            return 0
+        fi
+        printf 'zavet: git-hook floor NOT active' >&2
+        [ -z "$_hp" ] || printf ' (core.hooksPath=%s)' "$_hp" >&2
+        printf ' — run "zavet hooks install"\n' >&2
+        return 1
+    fi
+    if [ -n "$_hp" ] && [ "$_hp" != "$ZAVET_GITHOOKS_DIR" ]; then
+        printf 'zavet: core.hooksPath is already %s — not taking it over.\n' "$_hp" >&2
+        printf 'zavet: add this line to %s/commit-msg instead:\n' "$_hp" >&2
+        # shellcheck disable=SC2016
+        printf '  %s gate --staged --message-file "$1" --guards-only >&2 || exit 1\n' "$ZAVET_BIN_REL" >&2
+        return 1
+    fi
+    [ -f "$root/$ZAVET_GITHOOKS_DIR/commit-msg" ] || die "no $ZAVET_GITHOOKS_DIR/ — run: zavet adapters"
+    (cd -- "$root" && git config core.hooksPath "$ZAVET_GITHOOKS_DIR") ||
+        die "cannot set core.hooksPath"
+    printf 'zavet: git-hook floor active (core.hooksPath=%s)\n' "$ZAVET_GITHOOKS_DIR"
+}
+
+cmd_hook() {
+    [ $# -ge 1 ] || die "usage: zavet hook <guard-edit|guard-commit|refresh> [--flavor claude|grok|cursor]"
+    _kind=$1
+    shift
+    _flavor=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --flavor)
+                [ $# -ge 2 ] || die "--flavor needs a value"
+                _flavor=$2
+                shift 2
+                ;;
+            --flavor=*) _flavor=${1#--flavor=}; shift ;;
+            *) die "usage: zavet hook <kind> [--flavor claude|grok|cursor]" ;;
+        esac
+    done
+
+    # `refresh` needs no envelope and no jq: it is the side-effect-only hook
+    # that keeps the generated context files current for harnesses whose
+    # session-start stdout is discarded. Its OUTPUT is worthless and its write
+    # is the entire point.
+    if [ "$_kind" = "refresh" ]; then
+        top=$(repo_toplevel) || return 0
+        [ -d "$top/$ZAVET_DIR" ] || return 0
+        for _pair in "ctx_render_rules $ZAVET_GROK_RULES" "ctx_render_agents_md $ZAVET_AGENTS_MD"; do
+            _fn=${_pair%% *}
+            _rel=${_pair#* }
+            [ -f "$top/$_rel" ] || continue
+            ctx_write "$_fn" "$top" "$_rel" || true
+        done
+        return 0
+    fi
+
+    command -v jq >/dev/null 2>&1 || return 0
+    _json=$(cat) || return 0
+    [ -n "$_json" ] || return 0
+    _flavor=$(hook_flavor "$_json" "$_flavor")
+    case "$_kind" in
+        guard-edit) hook_guard_edit "$_json" "$_flavor" ;;
+        guard-commit) hook_guard_commit "$_json" "$_flavor" ;;
+        *) die "unknown hook kind '$_kind'" ;;
+    esac
 }
 
 # JSON-escape a string. Multi-line safe (deny reasons embed decision bodies),
@@ -1721,12 +2773,54 @@ json_escape() {
     '
 }
 
-# Print the PreToolUse permission-deny JSON the guard hooks emit. Centralised
-# here so the hooks do not each need jq just to build a static envelope.
+# Print the tool-denial envelope a guard hook returns, in one harness's shape.
+# Centralised here so the hooks do not each need jq just to build a static
+# envelope — and so the three shapes stay in one place to compare.
+#
+# Every harness invented its own key names for the same idea, and none of them
+# accepts another's. Claude Code reads `hookSpecificOutput.permissionDecision`;
+# Grok Build reads a flat `decision`/`reason` and parses `hookSpecificOutput`
+# ONLY for Stop hooks (xai-grok-hooks/src/runner/command.rs), so handing it the
+# Claude envelope is not a soft failure — it is a silent ALLOW, a guard that
+# looks installed and enforces nothing; Cursor reads `permission` plus separate
+# user- and agent-facing messages. Guessing wrong fails open, which is why the
+# caller passes the flavor it detected rather than this function sniffing.
+#
+# `zavet deny <reason>` and `--format claude` are byte-identical to each other
+# and to every version that shipped before formats existed — the hook contract
+# in README's "Integration contract" §3 depends on it.
 cmd_deny() {
-    [ $# -ge 1 ] || die "usage: zavet deny <reason>"
-    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' \
-        "$(json_escape "$1")"
+    fmt="claude"
+    case "${1:-}" in
+        --format)
+            [ $# -ge 2 ] || die "--format needs a value"
+            fmt=$2
+            shift 2
+            ;;
+        --format=*)
+            fmt=${1#--format=}
+            shift
+            ;;
+    esac
+    [ $# -ge 1 ] || die "usage: zavet deny [--format claude|grok|cursor] <reason>"
+    esc=$(json_escape "$1")
+    case "$fmt" in
+        claude)
+            printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' \
+                "$esc"
+            ;;
+        grok)
+            printf '{"decision":"deny","reason":"%s"}\n' "$esc"
+            ;;
+        cursor)
+            # Both messages carry the record: `agent_message` is what the model
+            # reads and must act on, `user_message` is the scrollback line. A
+            # guard that only told the human would teach nobody.
+            printf '{"permission":"deny","agent_message":"%s","user_message":"%s"}\n' \
+                "$esc" "$esc"
+            ;;
+        *) die "unknown deny format '$fmt' — expected claude, grok or cursor" ;;
+    esac
 }
 
 cmd_emit() {
@@ -1784,9 +2878,17 @@ case "$cmd" in
     section) cmd_section "$@" ;;
     verify) cmd_verify "$@" ;;
     check) cmd_check "$@" ;;
+    gate) cmd_gate "$@" ;;
     audit) cmd_audit ;;
     decision-path) cmd_decision_path "$@" ;;
     index) cmd_index ;;
+    rules) cmd_rules "$@" ;;
+    agents-md) cmd_agents_md "$@" ;;
+    context) cmd_context ;;
+    adapters) cmd_adapters "$@" ;;
+    hooks) cmd_hooks "$@" ;;
+    hook) cmd_hook "$@" ;;
+    bin) cmd_bin ;;
     deny) cmd_deny "$@" ;;
     emit) cmd_emit "$@" ;;
     version | --version | -V) cmd_version "$@" ;;

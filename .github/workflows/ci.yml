@@ -26,7 +26,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck bin/zavet hooks/scripts/*.sh test/*.sh
+        run: shellcheck bin/zavet hooks/scripts/*.sh test/*.sh scripts/*.sh
+
+  # The portable Agent Skills under .agents/skills/ are GENERATED from
+  # commands/*.md and skills/zavet/SKILL.md. Editing a command without
+  # regenerating leaves two copies of the same workflow that teach different
+  # things — and nothing about either file looks wrong, which is exactly why
+  # this has to be a build failure rather than a review habit.
+  adapters-sync:
+    name: generated skills match their sources
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: .agents/skills is up to date
+        run: sh scripts/gen-adapters.sh --check
 
   fixture-sync:
     runs-on: ubuntu-latest

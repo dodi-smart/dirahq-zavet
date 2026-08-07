@@ -1,21 +1,16 @@
 ---
 name: zavet
 description: Use when working in a repository that has a .zavet/ directory — defines when and how to capture decisions (commit trailers vs decision records), how to keep living feature specs current, how guards work, and the honesty rules for recorded knowledge.
+allowed-tools: Bash(.zavet/bin/zavet:*) Read Grep Glob
 metadata:
-  internal: "true"
+  source: "skills/zavet/SKILL.md"
+  generated: "true"
 ---
 
-<!--
-`internal: true` hides this copy from the `npx skills` installer, which scans
-`skills/` as well as the `.agents/skills/` paths the marketplace manifest
-declares. Without it the installer would find two skills named `zavet` — this
-one and the generated portable copy — and offer whichever it happened to reach
-first. Claude Code ignores the key entirely, so `/zavet:zavet` is unaffected.
+<!-- GENERATED from skills/zavet/SKILL.md by scripts/gen-adapters.sh — do not edit. -->
 
-This file is the CANONICAL source. Edit it, then run
-`sh scripts/gen-adapters.sh` to regenerate `.agents/skills/zavet/SKILL.md`.
--->
-
+Commands below use this repo's vendored CLI at `.zavet/bin/zavet`, written by
+`zavet adapters`. If zavet is on your PATH instead, use plain `zavet`.
 
 # Zavet — capturing knowledge as a byproduct of work
 
@@ -43,7 +38,7 @@ Refs: D-0042
 Allowed keys: `Why:` `Rejected:` `Constraint:` `Refs:` `Supersedes:` `Spec:`.
 One line each; multiple trailers per commit are fine.
 
-**Structural decisions → /zavet:decide.** Anything that shapes future changes
+**Structural decisions → zavet-decide.** Anything that shapes future changes
 (architecture choices, invariants, deliberate non-obvious behavior) becomes an
 append-only `<PREFIX>-NNNN` record with `guards:` globs over the code it shapes.
 
@@ -81,8 +76,8 @@ asks for.** While working:
 - Never flip `verified: true` yourself — that is the human confirming the
   spec matches the code.
 
-Explicit entry points exist for the non-default flows: `/zavet:spec design
-<feature>` (spec before code) and `/zavet:spec backfill <feature>`
+Explicit entry points exist for the non-default flows: `zavet-spec design
+<feature>` (spec before code) and `zavet-spec backfill <feature>`
 (reconstruct from existing code, honesty rules apply).
 
 ## Honoring guards
@@ -107,7 +102,7 @@ Explicit entry points exist for the non-default flows: `/zavet:spec design
   `Cargo.toml` / the CI workflow to find it. Never invent a runner, never
   assume a framework, never parse a command's output — **exit 0 is pass** and
   that is the entire contract.
-- Checks run ONLY from `/zavet:verify`, which a human invokes. Never wire them
+- Checks run ONLY from `zavet-verify`, which a human invokes. Never wire them
   into a hook or run them because a record happens to mention one.
 - When you record an invariant, say how it is verified: a `checks:` entry if it
   is mechanically checkable, or a `## Verification` note saying plainly that it
@@ -143,6 +138,14 @@ unmarked, and the next reader hits it first.
 
 ## Recall
 
-Answer "why is it like this?" via /zavet:why: INDEX.md → grep → ≤3 documents,
+Answer "why is it like this?" via zavet-why: INDEX.md → grep → ≤3 documents,
 citing decision ids. With dira installed, `dira zavet why <ID>` adds what the
 decision cost in engaged/agent time.
+
+## Guards may not be enforced by your harness
+
+Claude Code and Grok Build deny a guarded edit and show you the record. Every
+other harness does not, so the check is yours to make: run `.zavet/bin/zavet match
+<path>` before you edit, and read every record it names. A commit still gets
+caught by the `commit-msg` hook and by `zavet check` in CI — but by then you
+have already written code against a decision you never read.
