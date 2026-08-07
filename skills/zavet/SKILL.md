@@ -31,7 +31,19 @@ One line each; multiple trailers per commit are fine.
 
 **Structural decisions → /zavet:decide.** Anything that shapes future changes
 (architecture choices, invariants, deliberate non-obvious behavior) becomes an
-append-only `D-NNNN` record with `guards:` globs over the code it shapes.
+append-only `<PREFIX>-NNNN` record with `guards:` globs over the code it shapes.
+
+**Ids carry a per-repo prefix** — `CLOUD-00042`, `CLI-00007` — set in
+`.zavet/config` and printed by `zavet prefix`. It is what keeps ids
+unambiguous when several repos sit under one project. Never invent one: take
+what `zavet next-id` hands you. A repo with no config mints plain `D-NNNN`,
+which is still correct — the prefix is opt-in per repo, not a global rename.
+
+Ids are **immutable once merged**, because commit trailers already reference
+them. If two branches claim one number, `zavet check` fails the PR and prints
+`zavet renumber <old> <new>`; run it on the unmerged branch. Never renumber a
+record that is already on the base branch — record a correcting decision
+instead.
 
 ## Living specs — maintained transparently, not on request
 
@@ -50,7 +62,7 @@ asks for.** While working:
   the spec staged or the trailer present — satisfy it for real, don't
   trailer-spam your way past it.
 - Link decisions from specs, never the reverse: specs are living, decisions
-  are append-only. A `decisions: [D-NNNN]` frontmatter list and inline D-refs
+  are append-only. A `decisions: [<ID>]` frontmatter list and inline D-refs
   in the body both auto-link.
 - Never flip `verified: true` yourself — that is the human confirming the
   spec matches the code.
@@ -63,8 +75,8 @@ Explicit entry points exist for the non-default flows: `/zavet:spec design
 
 - Editing a guarded path surfaces the decision once per session (the edit hook
   denies your first attempt and shows the record — read it, then retry).
-- A commit touching guarded paths must carry `Refs: D-NNNN` (compliance) or
-  `Supersedes: D-NNNN` (intentional replacement, after recording the new
+- A commit touching guarded paths must carry `Refs: <ID>` (compliance) or
+  `Supersedes: <ID>` (intentional replacement, after recording the new
   decision). The commit hook enforces this.
 - Never work around a guard by re-wording the change. If the decision is wrong
   or stale, supersede it explicitly — that is a feature, not a failure.
@@ -95,9 +107,9 @@ Explicit entry points exist for the non-default flows: `/zavet:spec design
 Two different things, and the distinction is why supersession goes unused:
 
 - **Supersede** when a decision is replaced: `status: superseded` +
-  `superseded-by: D-MMMM` on the old record.
+  `superseded-by: <NEW-ID>` on the old record.
 - **Correct** when the decision still stands but ONE claim inside it is wrong.
-  Add `corrected-by: D-MMMM` to the old record; it stays `active` and its body
+  Add `corrected-by: <NEW-ID>` to the old record; it stays `active` and its body
   is untouched, and every recall path leads with the correction.
 
 Do not write a correction as prose inside an unrelated later record. That is
@@ -107,8 +119,8 @@ unmarked, and the next reader hits it first.
 ## Honesty rules
 
 - Decision records are **append-only**. The only permitted mutations of an
-  existing record are `status: active → superseded` + `superseded-by: D-MMMM`,
-  and adding `corrected-by: D-MMMM`. Both are frontmatter-only; the body of a
+  existing record are `status: active → superseded` + `superseded-by: <NEW-ID>`,
+  and adding `corrected-by: <NEW-ID>`. Both are frontmatter-only; the body of a
   recorded decision is never rewritten.
 - Anything reconstructed from existing code is `origin: reverse-engineered`,
   `verified: false`, with an Open Questions section. A wrong recorded "why" is
@@ -118,5 +130,5 @@ unmarked, and the next reader hits it first.
 ## Recall
 
 Answer "why is it like this?" via /zavet:why: INDEX.md → grep → ≤3 documents,
-citing decision ids. With dira installed, `dira zavet why D-NNNN` adds what the
+citing decision ids. With dira installed, `dira zavet why <ID>` adds what the
 decision cost in engaged/agent time.

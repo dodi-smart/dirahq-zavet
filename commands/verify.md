@@ -1,6 +1,6 @@
 ---
 description: Run the checks bound to decisions and specs, and report what is unchecked
-argument-hint: "[D-NNNN | <spec-slug> | <path>...] (default: everything)"
+argument-hint: "[<decision-id> | <spec-slug> | <path>...] (default: everything)"
 ---
 
 Run the recorded checks and report honestly on what they cover.
@@ -10,7 +10,7 @@ because a human asked for it, now. Never wire it into a hook, a `SessionStart`
 step, or anything that fires on its own.
 
 1. Resolve the argument:
-   - looks like `D-NNNN` → `sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" verify --id <id>`
+   - looks like a decision id (`<PREFIX>-NNNN`) → `sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" verify --id <id>`
    - a bare slug matching a spec → `… verify --spec <slug>`
    - one or more paths → `… verify --paths <p>...` (resolves through the same
      guard/spec tables the hooks use, so this matches what a commit would trip)

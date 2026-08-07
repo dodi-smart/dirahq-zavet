@@ -1,16 +1,29 @@
 ---
-description: Record a structural decision as an append-only D-NNNN record
+description: Record a structural decision as an append-only decision record
 argument-hint: [short description of the decision]
 ---
 
 Record a decision: $ARGUMENTS
 
-1. Get the next id: `sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" next-id`
+1. Get the next id — fetch first, so the scan sees the other branches:
 
-   It counts ids across every ref this clone can see, not just the checked-out
-   tree, so a number taken on another branch is not handed out twice. It cannot
-   see a branch that was never fetched, so if this is a long-lived branch,
-   fetch first. `zavet check` fails the PR if a collision lands anyway.
+   ```
+   git fetch --quiet --all 2>/dev/null || true
+   sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" next-id
+   ```
+
+   The id carries this repo's prefix (`zavet prefix` prints it), so it stays
+   unambiguous when several repos sit under one project. Numbering counts ids
+   across every ref this clone can see — and across every prefix the repo has
+   ever minted, since a retired prefix still burns its numbers — so a number
+   taken on another branch is not handed out twice. The fetch is best-effort;
+   a branch this clone has never seen is still invisible.
+
+   If a collision lands anyway, `zavet check` fails the PR and prints the
+   repair verbatim: `zavet renumber <old> <new>` moves the record and rewrites
+   every reference. That is safe precisely because the loser is still on an
+   unmerged branch — once a record is on the base branch its id is load-bearing
+   in commit trailers and renumber refuses it.
 2. Create `.zavet/decisions/<id>-<slug>.md` from the template at
    `${CLAUDE_PLUGIN_ROOT}/templates/decision.md`. Rules:
    - **Keep it under 60 lines.** A decision is a record, not an essay. Past
@@ -19,7 +32,7 @@ Record a decision: $ARGUMENTS
      decision, and belongs in `/zavet:spec` instead.
    - Frontmatter: `id`, `title`, `status: active`, `guards` (path globs of the
      code this decision shapes — as narrow as possible; over-broad guards cause
-     alert fatigue), optional `supersedes: D-NNNN`, optional `checks`,
+     alert fatigue), optional `supersedes: <ID>`, optional `checks`,
      `origin: recorded`, `verified: true`.
    - Body sections: Decision, Why, Rejected, Agent directives, Verification,
      and Open questions when anything could not be established.

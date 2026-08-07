@@ -65,6 +65,10 @@ gc() { git -C "$R" "$@"; }
 printf -- '-- dialect\n'
 R="$TMP/dialect"
 new_repo "$R"
+# The corpus carries its own config — `prefix: ZAVET`, `prefix-aliases: D`.
+# Both parsers read it, which is what lets ZAVET-0018 and the older D-*
+# records resolve side by side.
+cp "$FIX/config" "$R/.zavet/config"
 cp "$FIX"/decisions/*.md "$R/.zavet/decisions/"
 cp "$FIX"/specs/*.md "$R/.zavet/specs/"
 cp "$FIX/specs/.hidden-template.md" "$R/.zavet/specs/"
@@ -223,6 +227,51 @@ assert_eq "audit rows (minus shas)" "stale-spec	cap	1
 stale-decision	D-0001	1
 guard-pressure	D-0001	src/**" "$(printf '%s\n' "$out" | cut -f1-3)"
 assert_eq "guard-pressure counts files" "guard-pressure	D-0001	src/**	2	5" "$(printf '%s\n' "$out" | grep '^guard-pressure')"
+
+# --- uncovered-invariant / long-record: the two audit rows keyed by decision
+# id. REGRESSION: both used to derive the id as `${name%%-*}`, which is the
+# PREFIX, not the id — every row read `D`, and the checks-table lookup
+# (`$1 == i`) could never match, so a record WITH checks was still reported
+# uncovered. Nothing asserted on these rows, so it went unnoticed.
+R="$TMP/audit-invariants"
+new_repo "$R"
+mk_directive_record() { # $1 = id, $2 = slug, $3 = checks block (may be empty)
+    {
+        printf -- '---\nid: %s\ntitle: T\nstatus: active\n' "$1"
+        [ -n "$3" ] && printf '%s\n' "$3"
+        printf -- '---\n\n## Agent directives\n\n- do the thing\n'
+    } >"$R/.zavet/decisions/$1-$2.md"
+}
+mk_directive_record D-0001 unchecked ''
+mk_directive_record D-0002 checked 'checks:
+  - it holds :: true'
+out=$( (cd "$R" && sh "$Z" audit) )
+assert_eq "uncovered-invariant names the FULL id, not the prefix" \
+    "uncovered-invariant	D-0001	D-0001-unchecked.md" \
+    "$(printf '%s\n' "$out" | grep '^uncovered-invariant')"
+
+# A long record, and a prefixed one, so both rows are pinned under a prefix.
+(cd "$R" && sh "$Z" prefix CLOUD) >/dev/null 2>&1
+mk_directive_record CLOUD-0003 prefixed ''
+{
+    printf -- '---\nid: CLOUD-0004\ntitle: T\nstatus: active\n---\n'
+    i=0
+    while [ "$i" -lt 65 ]; do
+        printf 'filler line %s\n' "$i"
+        i=$((i + 1))
+    done
+} >"$R/.zavet/decisions/CLOUD-0004-long.md"
+out=$( (cd "$R" && sh "$Z" audit) )
+# Row order is filename-sort order, so adopting a prefix reorders the report
+# (CLOUD-* sorts before D-*). Pinned deliberately: the audit rows are diffed
+# by eye between runs, and a silent reordering would read as churn.
+assert_eq "uncovered-invariant works under a prefix too" \
+    "uncovered-invariant	CLOUD-0003	CLOUD-0003-prefixed.md
+uncovered-invariant	D-0001	D-0001-unchecked.md" \
+    "$(printf '%s\n' "$out" | grep '^uncovered-invariant')"
+assert_eq "long-record names the full id and the line count" \
+    "long-record	CLOUD-0004	70" \
+    "$(printf '%s\n' "$out" | grep '^long-record')"
 
 # -------------------------------------------------------------- version --
 # `zavet version` needs no .zavet/ and no git repo — it only depends on
@@ -485,6 +534,405 @@ base=$(gc rev-parse HEAD)
 out=$( (cd "$R" && sh "$Z" check "$base..$base" 2>/dev/null) ); rc=$?
 assert_eq "check fails on a canonical duplicate" "1" "$rc"
 assert_eq "check canonicalizes before comparing" "violation-duplicate-id	D-0007	D-0007-padded.md D-7-shorthand.md" "$out"
+
+# ----------------------------------------------------------------- prefix --
+printf -- '-- prefix\n'
+
+# The guarantee that makes this migration-free: a repo with no .zavet/config
+# behaves EXACTLY as it did before prefixes existed.
+R="$TMP/prefix-default"
+new_repo "$R"
+assert_eq "no config mints the historical D-NNNN" "D-0001" "$( (cd "$R" && sh "$Z" next-id) )"
+assert_eq "no config reports prefix D" "D" "$( (cd "$R" && sh "$Z" prefix) )"
+assert_eq "no config keeps width 4" "D-0042" \
+    "$(printf -- '---\nid: D-0041\nstatus: active\n---\nb\n' >"$R/.zavet/decisions/D-0041-x.md" &&
+        (cd "$R" && sh "$Z" next-id))"
+
+# --- derivation: product stem + role code.
+#
+# A prefix must carry the PRODUCT, not just the role — `cloud`, `cli` and `api`
+# are exactly the segments that repeat across sibling repos, so a last-segment
+# rule hands them all the same prefix.
+derive_in() { # $1 = org dir (may be empty), $2 = repo name, $3 = remote owner
+    _d="$TMP/derive/${1:-_}/$2"
+    rm -rf "$_d"
+    mkdir -p "$_d"
+    git -C "$_d" init -q
+    git -C "$_d" config user.email zavet-test@example.invalid
+    git -C "$_d" config user.name "zavet test"
+    git -C "$_d" config commit.gpgsign false
+    [ -n "$3" ] && git -C "$_d" remote add origin "git@github.com:$3/$2.git"
+    (cd "$_d" && sh "$Z" init) >/dev/null 2>&1
+    (cd "$_d" && sh "$Z" prefix)
+}
+assert_eq "cloud means backend, behind the product" "DIRABE" \
+    "$(derive_in dodi-smart dirahq-cloud dodi-smart)"
+assert_eq "cli means shell, behind the product" "DIRASH" \
+    "$(derive_in dodi-smart dirahq-cli dodi-smart)"
+assert_eq "no role segment: the name IS the identity" "ZAVET" \
+    "$(derive_in dodi-smart dirahq-zavet dodi-smart)"
+assert_eq "a stack token is not identity" "INFRPF" \
+    "$(derive_in "" infrasensing-supabase-platform "")"
+# The org token adds no disambiguation inside a workspace, so it is dropped —
+# `time` is what actually distinguishes this repo from its siblings.
+assert_eq "an org echo is dropped (org from the remote)" "TIMEAP" \
+    "$(derive_in teamschedule time-schedule-application teamschedule)"
+assert_eq "an org echo is dropped (org from the parent dir)" "TIMEAP" \
+    "$(derive_in teamschedule time-schedule-application "")"
+# ...but only when something distinguishing survives: a repo named after its
+# own org keeps its name rather than deriving from the role alone.
+assert_eq "an org-named repo keeps its name" "INFRPF" \
+    "$(derive_in infrasensing infrasensing-supabase-platform infrasensing)"
+# The collision this whole rule exists to prevent.
+assert_eq "sibling products no longer collide (1/2)" "ACMEBE" \
+    "$(derive_in acme acme-cloud acme)"
+assert_eq "sibling products no longer collide (2/2)" "WIDGBE" \
+    "$(derive_in acme widgets-cloud widgets)"
+
+# A corporate suffix is stripped LONGEST first, deterministically. `xyzmonorepo`
+# ends with both MONOREPO and REPO, and `for (k in arr)` has unspecified order
+# in awk — so which token won would depend on the awk build, and an id once
+# minted is permanent. XYZ (longest) rather than XYZMON (shortest).
+assert_eq "the longest corporate suffix wins, not whichever awk sees first" "XYZ" \
+    "$(derive_in "" xyzmonorepo "")"
+
+R="$TMP/derive/dodi-smart/dirahq-cloud"
+assert_eq "init scaffolds width 5" "DIRABE-00001" "$( (cd "$R" && sh "$Z" next-id) )"
+
+# `suggest` ranks candidates and explains each.
+assert_eq "suggest ranks candidates with rationale" \
+    "candidate	DIRABE	product + role
+candidate	DIRA	product only
+candidate	CLOUD	role only" \
+    "$( (cd "$R" && sh "$Z" suggest) | grep '^candidate')"
+
+R="$TMP/prefix-init-explicit/my-awesome-service"
+rm -rf "$TMP/prefix-init-explicit"
+mkdir -p "$R"
+git -C "$R" init -q
+(cd "$R" && sh "$Z" init --prefix ACME) >/dev/null 2>&1
+assert_eq "--prefix overrides derivation" "ACME" "$( (cd "$R" && sh "$Z" prefix) )"
+
+# --- sibling scan: a naming rule can only lower the ODDS of a collision;
+# reading the repos next door detects one. Offline, one level up, config only.
+SIB="$TMP/siblings/org"
+rm -rf "$TMP/siblings"
+for r in first-cloud second-web third-cloud; do
+    mkdir -p "$SIB/$r"
+    git -C "$SIB/$r" init -q
+done
+(cd "$SIB/first-cloud" && sh "$Z" init --prefix SHARED) >/dev/null 2>&1
+(cd "$SIB/second-web" && sh "$Z" init --prefix OTHER) >/dev/null 2>&1
+assert_eq "suggest reports prefixes the siblings hold" \
+    "taken	OTHER	second-web
+taken	SHARED	first-cloud" \
+    "$( (cd "$SIB/third-cloud" && sh "$Z" suggest) | grep '^taken' | sort)"
+# An uninitialized sibling contributes nothing, and neither does this repo.
+assert_eq "an uninitialized sibling is not reported" "2" \
+    "$( (cd "$SIB/third-cloud" && sh "$Z" suggest) | grep -c '^taken')"
+# Choosing a prefix a sibling already holds warns on stderr — loudly, while
+# changing it is still free.
+warn=$( (cd "$SIB/third-cloud" && sh "$Z" init --prefix SHARED) 2>&1 >/dev/null )
+case "$warn" in
+    *WARNING*SHARED*first-cloud*) pass "init warns when a sibling holds the prefix" ;;
+    *) fail "init warns when a sibling holds the prefix (got: $warn)" ;;
+esac
+# ...but it is a warning, not a wall: the user may have a reason.
+assert_eq "and still scaffolds" "SHARED" "$( (cd "$SIB/third-cloud" && sh "$Z" prefix) )"
+if (cd "$R" && rm -rf .zavet && sh "$Z" init --prefix "lower") >/dev/null 2>&1; then
+    fail "init accepts a lowercase prefix"
+else
+    pass "init refuses a lowercase prefix"
+fi
+
+# REGRESSION: the same check under a UTF-8 locale. `case $x in *[!A-Z0-9]*)`
+# uses a COLLATION-ordered range, which interleaves case (`a A b B …`), so
+# `[A-Z]` matched lowercase and `lower` was accepted as a prefix — a repo
+# would then mint ids dira-core refuses to capture at all. It reproduced only
+# where LANG is set: green on a bare C-locale shell, red on macOS CI.
+utf8_locale=""
+for cand in en_US.UTF-8 C.UTF-8 en_GB.UTF-8; do
+    if (LC_ALL="$cand" locale charmap) >/dev/null 2>&1; then
+        utf8_locale=$cand
+        break
+    fi
+done
+if [ -z "$utf8_locale" ]; then
+    printf 'skip lowercase-prefix locale check (no UTF-8 locale)\n'
+else
+    if (cd "$R" && rm -rf .zavet && LC_ALL="$utf8_locale" sh "$Z" init --prefix "lower") >/dev/null 2>&1; then
+        fail "init refuses a lowercase prefix under $utf8_locale"
+    else
+        pass "init refuses a lowercase prefix under $utf8_locale"
+    fi
+    # ...and a legitimate uppercase prefix still gets through there.
+    (cd "$R" && rm -rf .zavet && LC_ALL="$utf8_locale" sh "$Z" init --prefix ACME) >/dev/null 2>&1
+    assert_eq "and still accepts an uppercase one under $utf8_locale" "ACME" \
+        "$( (cd "$R" && sh "$Z" prefix) )"
+fi
+
+# --- retiring a prefix: records keep their ids, the counter continues.
+R="$TMP/prefix-migrate"
+new_repo "$R"
+printf -- '---\nid: D-0041\nstatus: active\n---\nb\n' >"$R/.zavet/decisions/D-0041-legacy.md"
+(cd "$R" && sh "$Z" prefix ZAVET) >/dev/null 2>&1
+assert_eq "prefix change retires the old one" "ZAVET D" "$( (cd "$R" && sh "$Z" prefixes) )"
+assert_eq "the counter continues across a prefix change" "ZAVET-0042" \
+    "$( (cd "$R" && sh "$Z" next-id) )"
+assert_eq "a retired-prefix id still resolves" ".zavet/decisions/D-0041-legacy.md" \
+    "$( (cd "$R" && sh "$Z" decision-path D-0041) )"
+if [ -f "$R/.zavet/decisions/D-0041-legacy.md" ]; then
+    pass "prefix change never renames a record"
+else
+    fail "prefix change renamed a record"
+fi
+assert_eq "width is untouched by a prefix change" "4" \
+    "$(awk -F': *' '/^id-width:/ { print $2 }' "$R/.zavet/config")"
+
+# --- a prefix is a NAMESPACE: same number, different prefix, no collision.
+R="$TMP/prefix-namespace"
+new_repo "$R"
+printf -- '---\nid: ZAVET-0016\nstatus: active\n---\nb\n' >"$R/.zavet/decisions/ZAVET-0016-ours.md"
+printf -- '---\nid: CLI-0016\nstatus: active\n---\nb\n' >"$R/.zavet/decisions/CLI-0016-theirs.md"
+gc add -A >/dev/null 2>&1
+gc commit -qm "records" >/dev/null 2>&1
+base=$(gc rev-parse HEAD)
+out=$( (cd "$R" && sh "$Z" check "$base..$base" 2>/dev/null) ); rc=$?
+assert_eq "different prefixes, same number, no collision" "0" "$rc"
+assert_eq "and nothing is reported" "" "$out"
+
+# ...but the same prefix at two widths IS one id.
+printf -- '---\nid: ZAVET-16\nstatus: active\n---\nb\n' >"$R/.zavet/decisions/ZAVET-16-shorthand.md"
+gc add -A >/dev/null 2>&1
+gc commit -qm "shorthand" >/dev/null 2>&1
+base=$(gc rev-parse HEAD)
+out=$( (cd "$R" && sh "$Z" check "$base..$base" 2>/dev/null) ); rc=$?
+assert_eq "same prefix, canonically equal, collides" "1" "$rc"
+assert_eq "and names both files" \
+    "violation-duplicate-id	ZAVET-0016	ZAVET-0016-ours.md ZAVET-16-shorthand.md" "$out"
+
+# --- renumber: the repair path CI prints.
+R="$TMP/prefix-renumber"
+new_repo "$R"
+(cd "$R" && sh "$Z" prefix ACME) >/dev/null 2>&1
+printf -- '---\nid: ACME-0001\nstatus: active\n---\nb\n' >"$R/.zavet/decisions/ACME-0001-first.md"
+printf -- '---\nid: ACME-0002\nstatus: active\ncorrected-by: ACME-0001\n---\nb\n' \
+    >"$R/.zavet/decisions/ACME-0002-second.md"
+cat >"$R/.zavet/specs/sync.md" <<'EOF'
+---
+title: Sync
+version: 1
+origin: designed
+verified: true
+confidence: high
+date: 2026-08-07
+paths:
+  - src/**
+decisions: [ACME-0001]
+---
+
+## Overview
+Per ACME-0001; CMD-0001 is not a decision ref.
+EOF
+gc add -A >/dev/null 2>&1
+gc commit -qm "records" >/dev/null 2>&1
+(cd "$R" && sh "$Z" renumber ACME-0001 ACME-0003) >/dev/null 2>&1
+if [ -f "$R/.zavet/decisions/ACME-0003-first.md" ] && [ ! -e "$R/.zavet/decisions/ACME-0001-first.md" ]; then
+    pass "renumber moves the record and keeps the slug"
+else
+    fail "renumber moves the record and keeps the slug"
+fi
+assert_eq "renumber rewrites the record's own id" "id: ACME-0003" \
+    "$(grep '^id:' "$R/.zavet/decisions/ACME-0003-first.md")"
+assert_eq "renumber rewrites an errata pointer" "corrected-by: ACME-0003" \
+    "$(grep '^corrected-by:' "$R/.zavet/decisions/ACME-0002-second.md")"
+assert_eq "renumber rewrites a spec decisions list" "decisions: [ACME-0003]" \
+    "$(grep '^decisions:' "$R/.zavet/specs/sync.md")"
+assert_eq "renumber leaves a lookalike prefix alone" \
+    "Per ACME-0003; CMD-0001 is not a decision ref." \
+    "$(grep '^Per ' "$R/.zavet/specs/sync.md")"
+if (cd "$R" && sh "$Z" renumber ACME-0002 ACME-0003) >/dev/null 2>&1; then
+    fail "renumber onto a claimed id"
+else
+    pass "renumber refuses a claimed id"
+fi
+
+# --- renumber refuses a record already on the base branch: its id is
+# load-bearing in merged commit trailers, which renumber cannot rewrite.
+gc add -A >/dev/null 2>&1
+gc commit -qm "renumbered" >/dev/null 2>&1
+gc branch -q base 2>/dev/null
+if (cd "$R" && sh "$Z" renumber --base base ACME-0003 ACME-0009) >/dev/null 2>&1; then
+    fail "renumber rewrites a merged record"
+else
+    pass "renumber refuses a merged record"
+fi
+if (cd "$R" && sh "$Z" renumber --base base --force ACME-0003 ACME-0009) >/dev/null 2>&1; then
+    pass "--force overrides the merged-record refusal"
+else
+    fail "--force overrides the merged-record refusal"
+fi
+
+# --- REGRESSION: renumber must not report failure for work it completed.
+# cmd_index dies on a missing INDEX.md, and renumber called it unconditionally
+# AFTER the rename — so in a repo with no index the file moved, the refs were
+# rewritten, and the command still exited 1.
+R="$TMP/prefix-renumber-noindex"
+new_repo "$R"
+rm -f "$R/.zavet/INDEX.md"
+printf -- '---\nid: D-0001\nstatus: active\n---\nb\n' >"$R/.zavet/decisions/D-0001-x.md"
+if (cd "$R" && sh "$Z" renumber D-0001 D-0002) >/dev/null 2>&1; then
+    pass "renumber succeeds without an INDEX.md"
+else
+    fail "renumber succeeds without an INDEX.md"
+fi
+if [ -f "$R/.zavet/decisions/D-0002-x.md" ]; then
+    pass "and the record really moved"
+else
+    fail "and the record really moved"
+fi
+
+# --- the motivating scenario end to end: a clean auto-merge lands two records
+# claiming one id. `check` must fail, name a DISTINCT free id per row, and the
+# suggested command must actually resolve — by path, since the id itself is
+# ambiguous and renumber refuses to guess which record to move.
+R="$TMP/prefix-collision"
+new_repo "$R"
+(cd "$R" && sh "$Z" prefix ACME) >/dev/null 2>&1
+printf -- '---\nid: ACME-0001\nstatus: active\nguards:\n  - src/**\n---\nb\n' \
+    >"$R/.zavet/decisions/ACME-0001-ours.md"
+printf -- '---\nid: ACME-0001\nstatus: active\n---\nb\n' \
+    >"$R/.zavet/decisions/ACME-0001-theirs.md"
+printf -- '---\nid: ACME-0002\nstatus: active\n---\nb\n' \
+    >"$R/.zavet/decisions/ACME-0002-ours.md"
+printf -- '---\nid: ACME-0002\nstatus: active\n---\nb\n' \
+    >"$R/.zavet/decisions/ACME-0002-theirs.md"
+gc add -A >/dev/null 2>&1
+gc commit -qm "merge landed two pairs" >/dev/null 2>&1
+base=$(gc rev-parse HEAD)
+err=$( (cd "$R" && sh "$Z" check "$base..$base" 2>&1 >/dev/null) )
+assert_eq "each duplicate row gets its OWN free id" \
+    "  → sh bin/zavet renumber ACME-0001 ACME-0003
+  → sh bin/zavet renumber ACME-0002 ACME-0004" \
+    "$(printf '%s\n' "$err" | grep 'renumber')"
+# An ambiguous id is refused rather than silently picking a record...
+if (cd "$R" && sh "$Z" renumber ACME-0001 ACME-0003) >/dev/null 2>&1; then
+    fail "renumber refuses an ambiguous id"
+else
+    pass "renumber refuses an ambiguous id"
+fi
+# ...and names the candidates so the caller can disambiguate by path.
+out=$( (cd "$R" && sh "$Z" renumber ACME-0001 ACME-0003 2>&1 >/dev/null) )
+assert_eq "and lists the candidate paths" \
+    "  .zavet/decisions/ACME-0001-ours.md
+  .zavet/decisions/ACME-0001-theirs.md" \
+    "$(printf '%s\n' "$out" | grep '^  \.zavet')"
+(cd "$R" && sh "$Z" renumber .zavet/decisions/ACME-0001-theirs.md ACME-0003) >/dev/null 2>&1
+(cd "$R" && sh "$Z" renumber .zavet/decisions/ACME-0002-theirs.md ACME-0004) >/dev/null 2>&1
+gc add -A >/dev/null 2>&1
+gc commit -qm "repaired" >/dev/null 2>&1
+base=$(gc rev-parse HEAD)
+out=$( (cd "$R" && sh "$Z" check "$base..$base" 2>/dev/null) ); rc=$?
+assert_eq "the suggested repair clears the violation" "0" "$rc"
+assert_eq "and leaves nothing reported" "" "$out"
+
+# --- a wider repo detects the same canonical collision at ITS width.
+R="$TMP/prefix-width5"
+new_repo "$R"
+printf 'prefix: ACME\nid-width: 5\n' >"$R/.zavet/config"
+assert_eq "a width-5 repo mints 5 wide" "ACME-00001" "$( (cd "$R" && sh "$Z" next-id) )"
+printf -- '---\nid: ACME-00016\nstatus: active\n---\nb\n' >"$R/.zavet/decisions/ACME-00016-a.md"
+printf -- '---\nid: ACME-16\nstatus: active\n---\nb\n' >"$R/.zavet/decisions/ACME-16-b.md"
+gc add -A >/dev/null 2>&1
+gc commit -qm "records" >/dev/null 2>&1
+base=$(gc rev-parse HEAD)
+out=$( (cd "$R" && sh "$Z" check "$base..$base" 2>/dev/null) ); rc=$?
+assert_eq "shorthand collides at width 5 too" "1" "$rc"
+assert_eq "and canonicalizes to the repo's width" \
+    "violation-duplicate-id	ACME-00016	ACME-00016-a.md ACME-16-b.md" "$out"
+
+# --- the trailer floor accepts a retired prefix, so older commits stay
+# compliant after a rename.
+R="$TMP/prefix-trailer"
+new_repo "$R"
+printf -- '---\nid: D-0001\nstatus: active\nguards:\n  - src/**\n---\nb\n' \
+    >"$R/.zavet/decisions/D-0001-legacy.md"
+gc add -A >/dev/null 2>&1
+gc commit -qm "records" >/dev/null 2>&1
+(cd "$R" && sh "$Z" prefix ZAVET) >/dev/null 2>&1
+mkdir -p "$R/src"
+printf 'x\n' >"$R/src/a.rs"
+gc add -A >/dev/null 2>&1
+gc commit -qm "feat: touch guarded path
+
+Refs: D-0001" >/dev/null 2>&1
+out=$( (cd "$R" && sh "$Z" check "HEAD~1..HEAD" 2>/dev/null) ); rc=$?
+assert_eq "a retired-prefix trailer still satisfies the guard floor" "0" "$rc"
+assert_eq "and reports no violation" "" "$out"
+
+# ------------------------------------------------------------------ hooks --
+# The guard-commit hook builds its trailer regex from `zavet prefixes`, so a
+# repo that retired a prefix must still accept trailers naming the old one.
+# The hook had no coverage at all before this; it fails open by design, which
+# makes a silently-broken regex invisible in normal use.
+printf -- '-- hooks\n'
+if ! command -v jq >/dev/null 2>&1; then
+    printf 'skip hooks (no jq)\n'
+else
+    HOOK="$ROOT/hooks/scripts/guard-commit.sh"
+    R="$TMP/hooks"
+    new_repo "$R"
+    printf -- '---\nid: D-0001\ntitle: Guarded\nstatus: active\nguards:\n  - src/**\n---\nb\n' \
+        >"$R/.zavet/decisions/D-0001-guarded.md"
+    mkdir -p "$R/src"
+    echo x >"$R/src/a.rs"
+    gc add -A >/dev/null 2>&1
+    gc commit -qm "chore: scaffold" >/dev/null 2>&1
+    echo y >"$R/src/a.rs"
+    gc add -A >/dev/null 2>&1
+
+    hook_out() { # $1 = commit command, $2 = session id
+        jq -nc --arg c "$1" --arg d "$R" --arg s "$2" \
+            '{tool_input: {command: $c}, cwd: $d, session_id: $s}' | sh "$HOOK"
+    }
+
+    out=$(hook_out 'git commit -m "feat: touch guarded path"' s1)
+    if printf '%s' "$out" | grep -q 'permissionDecision'; then
+        pass "hook blocks a guarded commit with no trailer"
+    else
+        fail "hook blocks a guarded commit with no trailer"
+    fi
+
+    out=$(hook_out 'git commit -m "feat: x
+
+Refs: D-0001"' s2)
+    assert_eq "hook passes a current-prefix trailer" "" "$out"
+
+    # A non-commit Bash call never reaches the guard logic.
+    assert_eq "hook ignores a non-commit command" "" "$(hook_out 'git log --grep=commit' s3)"
+
+    # REGRESSION: retire the prefix. Commits already in the log name `D-0001`,
+    # and the hook must keep honoring them — otherwise adopting a prefix would
+    # block every future change to paths guarded by a pre-rename record.
+    (cd "$R" && sh "$Z" prefix ACME) >/dev/null 2>&1
+    assert_eq "hook still passes a RETIRED-prefix trailer" "" \
+        "$(hook_out 'git commit -m "feat: x
+
+Refs: D-0001"' s4)"
+    # The assertion that actually pins the alternation to config: a trailer
+    # naming the CURRENT prefix. A hook hardcoded to `D-[0-9]+` passes the
+    # retired case above by accident, and blocks this one.
+    assert_eq "hook passes a NEW-prefix trailer" "" \
+        "$(hook_out 'git commit -m "feat: x
+
+Refs: ACME-0002"' s6)"
+    out=$(hook_out 'git commit -m "feat: touch guarded path"' s5)
+    if printf '%s' "$out" | grep -q 'permissionDecision'; then
+        pass "hook still blocks an untrailered commit after a prefix change"
+    else
+        fail "hook still blocks an untrailered commit after a prefix change"
+    fi
+fi
 
 # ---------------------------------------------------------------- summary --
 if [ "$fails" -gt 0 ]; then

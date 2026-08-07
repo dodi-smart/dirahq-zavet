@@ -21,9 +21,24 @@ usage() {
 zavet — repo-local knowledge layer (decisions, guards, trailers)
 
 Usage:
-  zavet init                  Scaffold .zavet/ in the current git repo
+  zavet init [--prefix P]     Scaffold .zavet/ in the current git repo
+                              (prefix derived from the repo name if omitted)
   zavet root                  Print repo toplevel (fails unless .zavet/ exists)
-  zavet next-id               Print the next decision id (D-NNNN)
+  zavet prefix [<NEW>]        Print the decision-id prefix, or change the one
+                              NEW ids are minted with. Existing records keep
+                              their ids; the old prefix is retired into
+                              prefix-aliases and stays resolvable.
+  zavet prefixes              Print every prefix ids may carry (minting first,
+                              then retired), space-separated
+  zavet suggest               Prefix candidates for this repo, best first, plus
+                              prefixes sibling repos already claim. Works
+                              before init — this is what /zavet:init offers
+  zavet renumber [--base <ref>] [--force] <old-id|path> <new-id>
+                              Move a decision to a free id and rewrite every
+                              reference. Refuses a record already on <ref>
+                              (default origin/HEAD) — merged ids are
+                              load-bearing in commit trailers.
+  zavet next-id               Print the next decision id (PREFIX-NNNN)
   zavet list                  Print TAB-separated: id, status, title
   zavet guards                Print TAB-separated: id, guard glob (active only)
   zavet match <path>          Print ids of active decisions guarding <path>
@@ -93,6 +108,340 @@ zavet_root() {
     top=$(repo_toplevel) || die "not inside a git repository"
     [ -d "$top/$ZAVET_DIR" ] || die "no $ZAVET_DIR/ in $top (run: zavet init)"
     printf '%s\n' "$top"
+}
+
+# ------------------------------------------------------------------ config --
+#
+# `.zavet/config` is plain `key: value` with `#` comments — the same item
+# grammar as frontmatter bodies, minus the fences.
+#
+# An absent or unparseable file yields the PRE-PREFIX defaults, so every repo
+# scaffolded before prefixes existed keeps behaving byte-for-byte as it did:
+# ids stay `D-NNNN`, padded to four. That default is the whole reason this
+# change needs no migration.
+ZAVET_DEFAULT_PREFIX="D"
+ZAVET_DEFAULT_WIDTH=4
+# Padding width is bounded because it is a KEY, not a display choice: an id
+# minted at one width never joins a shorthand ref resolved at another.
+ZAVET_MAX_WIDTH=9
+# 1–6 chars so an id stays quotable in a commit trailer; leading letter so it
+# can never be mistaken for the number it prefixes.
+ZAVET_MAX_PREFIX=6
+
+# One `key: value` out of .zavet/config, or $3 when the file, the key or the
+# value is absent.
+config_get() { # $1 = root, $2 = key, $3 = fallback
+    _cf="$1/$ZAVET_DIR/config"
+    _v=""
+    if [ -f "$_cf" ]; then
+        _v=$(awk -v k="$2" '
+            function decomment(s) {
+                if (s ~ /^#/) return ""
+                if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
+                return s
+            }
+            index($0, k ":") == 1 {
+                s = substr($0, length(k) + 2)
+                sub(/^[ \t]*/, "", s)
+                s = decomment(s)
+                sub(/[ \t]+$/, "", s)
+                gsub(/^["'\'']|["'\''][ \t]*$/, "", s)
+                print s
+                exit
+            }
+        ' "$_cf")
+    fi
+    [ -n "$_v" ] || _v=$3
+    printf '%s\n' "$_v"
+}
+
+# A well-formed prefix. Uppercase only — the filename grammar keys on it (a
+# lowercase `notes-2024.md` must not read as a record), and dira-core rejects
+# a non-uppercase prefix outright, so minting one here would produce records
+# the daemon never captures.
+#
+# The sets are spelled out rather than written `[A-Z0-9]`: a RANGE in a `case`
+# pattern is collation-ordered, and under a UTF-8 locale it matches lowercase
+# too (`a A b B …`). With `[A-Z]` this accepted `lower` on any machine whose
+# LANG was set — which is most of them, but not a bare C-locale shell, so it
+# passed locally and failed on macOS CI.
+valid_prefix() {
+    case "$1" in
+        '') return 1 ;;
+        *[!ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]*) return 1 ;;
+        [ABCDEFGHIJKLMNOPQRSTUVWXYZ]*) [ "${#1}" -le "$ZAVET_MAX_PREFIX" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# The prefix NEW ids are minted with.
+zavet_prefix() { # $1 = root
+    _p=$(config_get "$1" prefix "$ZAVET_DEFAULT_PREFIX")
+    valid_prefix "$_p" || _p=$ZAVET_DEFAULT_PREFIX
+    printf '%s\n' "$_p"
+}
+
+# Zero-padding width for minted ids. Out-of-range values fall back rather than
+# fail: a typo in config must not take every command down with it.
+zavet_id_width() { # $1 = root
+    _w=$(config_get "$1" id-width "$ZAVET_DEFAULT_WIDTH")
+    case "$_w" in
+        '' | *[!0-9]*) _w=$ZAVET_DEFAULT_WIDTH ;;
+    esac
+    if [ "$_w" -lt 1 ] || [ "$_w" -gt "$ZAVET_MAX_WIDTH" ]; then
+        _w=$ZAVET_DEFAULT_WIDTH
+    fi
+    printf '%s\n' "$_w"
+}
+
+# Every prefix an id in this repo may carry — the minting prefix first, then
+# any retired by `zavet prefix`. Retired prefixes stay resolvable forever:
+# records are append-only, so ids minted under an old prefix keep it.
+# Space-separated.
+zavet_prefix_set() { # $1 = root
+    _root=$1
+    _mint=$(zavet_prefix "$_root")
+    _out=$_mint
+    # Comma- or space-separated, so both `D, LEGACY` and `D LEGACY` read.
+    for _x in $(config_get "$_root" prefix-aliases "" | tr ',' ' '); do
+        valid_prefix "$_x" || continue
+        [ "$_x" = "$_mint" ] && continue
+        _out="$_out $_x"
+    done
+    printf '%s\n' "$_out"
+}
+
+# The prefix set as an ERE alternation (`D|ZAVET`), for grep and awk.
+zavet_prefix_alt() { # $1 = root
+    zavet_prefix_set "$1" | tr ' ' '|'
+}
+
+# Width for a freshly scaffolded repo. Deliberately wider than the historical
+# 4: a repo with no config keeps 4 forever (that is what makes this change
+# migration-free), so 5 only ever applies where nothing has been minted yet.
+ZAVET_INIT_WIDTH=5
+
+write_config() { # $1 = path, $2 = prefix, $3 = aliases, $4 = width
+    cat >"$1" <<EOF
+# Decision id prefix for NEW records. 1-$ZAVET_MAX_PREFIX uppercase chars, leading letter.
+prefix: $2
+# Prefixes retired by \`zavet prefix\` — resolved on read, never minted again.
+# Records are append-only, so an id keeps the prefix it was minted under.
+prefix-aliases: $3
+# Zero-padding width for minted ids. Fixed at scaffold time: an id minted at
+# one width never joins a shorthand ref resolved at another.
+id-width: $4
+EOF
+}
+
+# The org this repo belongs to — used only to drop repo tokens that echo it.
+#
+# The remote owner is authoritative; the PARENT DIRECTORY is the fallback,
+# because `~/src/<org>/<repo>` carries the same signal and a repo may have no
+# remote yet. Empty when neither is available; every consumer treats that as
+# "no org information", never as a value.
+repo_org() { # $1 = repo toplevel
+    _url=$(git -C "$1" remote get-url origin 2>/dev/null) || _url=""
+    _org=""
+    case "$_url" in
+        *[:/]*/*)
+            # git@host:owner/repo.git | https://host/owner/repo.git
+            _org=${_url%/*}
+            _org=${_org##*[:/]}
+            ;;
+    esac
+    if [ -z "$_org" ]; then
+        _parent=${1%/*}
+        [ "$_parent" != "$1" ] && _org=${_parent##*/}
+    fi
+    printf '%s\n' "$_org"
+}
+
+# Derive decision-id prefix CANDIDATES from the repo name, best first.
+# Prints "prefix<TAB>rationale" per line.
+#
+# The rule that matters: a prefix must carry the PRODUCT, not just the role.
+# `cloud`, `cli`, `web` and `api` are precisely the segments that repeat across
+# repos, so keying on the last segment hands sibling repos the SAME prefix —
+# the ambiguity prefixes exist to remove. So the default is a product stem plus
+# a canonical role code:
+#
+#   dirahq-cloud → DIRABE   (dira + backend; cloud/server/api all mean backend)
+#   dirahq-cli   → DIRASH   (dira + shell)
+#   dirahq-zavet → ZAVET    (no role segment → the name IS the identity)
+#
+# Segments are classified, not just truncated: corporate noise (`hq`, `inc`)
+# is dropped — including as a suffix INSIDE a segment, which is how `DIRAHQ`
+# becomes `DIRA` — and so is the stack (`supabase`, `react`), which describes
+# how a thing is built rather than what it is.
+#
+# Tokens that merely echo the org are dropped too: inside one workspace they
+# disambiguate nothing (`teamschedule/time-schedule-application` → TIMEAP, not
+# TISCAP). Only when a distinguishing token survives — an org-named repo like
+# `infrasensing/infrasensing-platform` keeps its name rather than deriving
+# from the role alone.
+derive_candidates() { # $1 = repo toplevel, $2 = org (may be empty)
+    awk -v name="${1##*/}" -v org="$2" -v max="$ZAVET_MAX_PREFIX" '
+        function stem(w,   s, i, per) {
+            if (nn == 0) return ""
+            if (nn == 1) return substr(NAME[1], 1, w)
+            if (nn == 2) {
+                per = int((w + 1) / 2)
+                s = substr(NAME[1], 1, per)
+                return substr(s substr(NAME[2], 1, w - length(s)), 1, w)
+            }
+            s = ""
+            for (i = 1; i <= nn && length(s) < w; i++) s = s substr(NAME[i], 1, 1)
+            return substr(s, 1, w)
+        }
+        function emit(p, why) {
+            if (p == "" || length(p) < 2 || (p in seen)) return
+            if (p !~ /^[A-Z][A-Z0-9]*$/) return
+            seen[p] = 1
+            print p "\t" why
+        }
+        BEGIN {
+            nz = split("HQ INC LLC LTD CO CORP LABS IO MONO MONOREPO REPO SRC PROJECT", z, " ")
+            for (i = 1; i <= nz; i++) NOISE[z[i]] = 1
+            # Suffix stripping walks these LONGEST FIRST, and the order is
+            # built explicitly because `for (k in arr)` is unspecified: a
+            # segment ending in MONOREPO also ends in REPO, so which token won
+            # would otherwise depend on the awk build — and an id, once
+            # minted, is permanent.
+            nq = 0
+            for (L = 12; L >= 2; L--)
+                for (i = 1; i <= nz; i++)
+                    if (length(z[i]) == L) NOISEQ[++nq] = z[i]
+            nt = split("SUPABASE POSTGRES POSTGRESQL MYSQL SQLITE REDIS REACT NEXT NEXTJS " \
+                  "VUE SVELTE ANGULAR RAILS DJANGO FLASK SPRING NODE DENO BUN AWS GCP " \
+                  "AZURE K8S KUBERNETES DOCKER TERRAFORM FIREBASE", t, " ")
+            for (i = 1; i <= nt; i++) TECH[t[i]] = 1
+            # role word : code. Codes are 2-3 chars; the stem takes whatever
+            # the budget leaves, so a longer code simply shortens the stem.
+            nr = split("CLOUD:BE BACKEND:BE SERVER:BE API:BE SERVICE:BE SVC:BE BE:BE " \
+                       "CLI:SH SHELL:SH TERMINAL:SH CONSOLE:SH TUI:SH " \
+                       "WEB:FE FRONTEND:FE UI:FE SITE:FE WWW:FE FE:FE " \
+                       "APP:AP APPLICATION:AP MOBILE:AP IOS:AP ANDROID:AP " \
+                       "PLATFORM:PF CORE:PF INFRA:PF INFRASTRUCTURE:PF " \
+                       "WORKER:WK JOB:WK JOBS:WK CRON:WK DAEMON:WK QUEUE:WK " \
+                       "PROXY:GW GATEWAY:GW EDGE:GW " \
+                       "SDK:LIB LIB:LIB LIBRARY:LIB PKG:LIB PACKAGE:LIB " \
+                       "DOCS:DOC DOC:DOC DOCUMENTATION:DOC WIKI:DOC", r, " ")
+            for (i = 1; i <= nr; i++) { split(r[i], kv, ":"); ROLE[kv[1]] = kv[2] }
+
+            ORGU = toupper(org)
+            gsub(/[^A-Z0-9]/, "", ORGU)
+            n = split(toupper(name), seg, /[-_.]+/)
+            nn = 0; role = ""; roleword = ""; tech = ""
+            for (i = 1; i <= n; i++) {
+                s = seg[i]
+                gsub(/[^A-Z0-9]/, "", s)
+                if (s == "") continue
+                if (s in NOISE) continue
+                if (s in TECH) { if (tech == "") tech = s; continue }
+                if (s in ROLE) { if (role == "") { role = ROLE[s]; roleword = s } continue }
+                # A corporate suffix inside the segment: DIRAHQ → DIRA. Guarded
+                # so stripping never leaves a stub shorter than 3.
+                for (qi = 1; qi <= nq; qi++) {
+                    L = length(NOISEQ[qi])
+                    if (length(s) > L + 2 && substr(s, length(s) - L + 1) == NOISEQ[qi]) {
+                        s = substr(s, 1, length(s) - L)
+                        break
+                    }
+                }
+                NAME[++nn] = s
+            }
+            # Org echo. Only tokens of 4+ chars, so a short name cannot be
+            # swallowed by an incidental substring match.
+            orgdropped = 0
+            if (ORGU != "" && nn > 0) {
+                keep = 0
+                for (i = 1; i <= nn; i++)
+                    if (length(NAME[i]) < 4 || index(ORGU, NAME[i]) == 0) keep++
+                if (keep > 0 && keep < nn) {
+                    m = 0
+                    for (i = 1; i <= nn; i++)
+                        if (length(NAME[i]) < 4 || index(ORGU, NAME[i]) == 0) KEEP[++m] = NAME[i]
+                    for (i = 1; i <= nn; i++) UNSTRIPPED[i] = NAME[i]
+                    un = nn
+                    for (i = 1; i <= m; i++) NAME[i] = KEEP[i]
+                    for (i = m + 1; i <= nn; i++) delete NAME[i]
+                    nn = m
+                    orgdropped = 1
+                }
+            }
+
+            if (nn == 0) {
+                # Nothing but role/noise/stack — the role word is all there is.
+                emit(substr(roleword, 1, max), "role only")
+                emit(substr(tech, 1, max), "stack only")
+                exit
+            }
+            if (role != "") {
+                emit(stem(max - length(role)) role, "product + role")
+                emit(substr(NAME[1], 1, 5), "product only")
+                if (tech != "") emit(stem(max - 2) substr(tech, 1, 2), "product + stack")
+                else if (orgdropped) {
+                    saved = nn
+                    for (i = 1; i <= un; i++) NAME[i] = UNSTRIPPED[i]
+                    nn = un
+                    emit(stem(max - length(role)) role, "product + role, org kept")
+                    nn = saved
+                } else emit(substr(roleword, 1, max), "role only")
+            } else {
+                # No role: the LAST name token is the identity.
+                emit(substr(NAME[nn], 1, max), "identity")
+                if (nn > 1) {
+                    s = ""
+                    for (i = 1; i <= nn; i++) s = s substr(NAME[i], 1, 1)
+                    emit(substr(s, 1, max), "initials")
+                    emit(substr(NAME[1], 1, max), "first segment")
+                }
+            }
+        }
+    ' </dev/null
+}
+
+# The best candidate, or the historical prefix when a name derives nothing
+# usable (all digits, empty) rather than failing the scaffold.
+derive_prefix() { # $1 = repo toplevel
+    _cand=$(derive_candidates "$1" "$(repo_org "$1")" | awk -F'\t' 'NR == 1 { print $1 }')
+    valid_prefix "$_cand" || _cand=$ZAVET_DEFAULT_PREFIX
+    printf '%s\n' "$_cand"
+}
+
+# Prefixes already claimed by repos sitting beside this one.
+#
+# This is the half of the problem naming rules cannot solve: a derivation rule
+# lowers the ODDS of two repos colliding, reading the siblings DETECTS it. One
+# level of the parent directory, config files only — offline, no network, and
+# no dependency on dira.
+sibling_prefixes() { # $1 = repo toplevel
+    _parent=${1%/*}
+    [ "$_parent" != "$1" ] && [ -d "$_parent" ] || return 0
+    for _d in "$_parent"/*; do
+        [ -d "$_d" ] || continue
+        [ "$_d" != "$1" ] || continue
+        [ -f "$_d/$ZAVET_DIR/config" ] || continue
+        _p=$(config_get "$_d" prefix "")
+        valid_prefix "$_p" || continue
+        printf 'taken\t%s\t%s\n' "$_p" "${_d##*/}"
+    done
+}
+
+# Prefix candidates for this repo plus the prefixes its siblings already hold.
+# Runs BEFORE .zavet/ exists — it is what /zavet:init offers you to choose
+# from, so it deliberately does not require an initialized repo.
+#
+#   candidate<TAB>prefix<TAB>rationale
+#   taken<TAB>prefix<TAB>repo
+cmd_suggest() {
+    top=$(repo_toplevel) || die "not inside a git repository"
+    derive_candidates "$top" "$(repo_org "$top")" | while IFS= read -r row; do
+        [ -n "$row" ] || continue
+        printf 'candidate\t%s\n' "$row"
+    done
+    sibling_prefixes "$top"
 }
 
 # Parse decision-file frontmatter — MANY files in a single awk pass.
@@ -224,11 +573,78 @@ frontmatter() {
     ' "$@"
 }
 
+# Is this basename a decision record (`<PREFIX>-<digits>[-slug].md`)?
+#
+# Shape alone, no config: decisions/ is a CLOSED directory, so a generic
+# prefix is safe here in a way it never is in free text (where `UTF-8` and
+# `SHA-256` would read as decision refs). Scaffolding is dot-prefixed and
+# never globbed in the first place.
+is_decision_file() { # $1 = basename
+    case "$1" in
+        *.md) ;;
+        *) return 1 ;;
+    esac
+    _pfx=${1%%-*}
+    [ "$_pfx" != "$1" ] || return 1
+    valid_prefix "$_pfx" || return 1
+    _num=${1#*-}
+    _num=${_num%%-*}
+    _num=${_num%.md}
+    case "$_num" in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+# `<PREFIX>-<digits>` out of a decision basename, dropping any slug.
+#
+# Callers reach this only past is_decision_file, so the shape is guaranteed.
+# Note this is the FULL id: `${name%%-*}` yields just the prefix, which is
+# what the audit rows used to report.
+id_from_file() { # $1 = basename
+    _id=${1%.md}
+    _rest=${_id#*-}
+    printf '%s-%s\n' "${_id%%-*}" "${_rest%%-*}"
+}
+
 each_decision() { # $1 = root
-    for f in "$1/$ZAVET_DIR"/decisions/D-*.md; do
+    for f in "$1/$ZAVET_DIR"/decisions/*.md; do
+        [ -e "$f" ] || continue
+        is_decision_file "${f##*/}" || continue
+        printf '%s\n' "$f"
+    done
+}
+
+each_spec() { # $1 = root
+    for f in "$1/$ZAVET_DIR"/specs/*.md; do
         [ -e "$f" ] || continue
         printf '%s\n' "$f"
     done
+}
+
+# Render `<prefix>-<number>` at a padding width. Padding only WIDENS — a
+# number that overflows the field keeps its natural size, exactly as the old
+# `%04d` did, so neither width imposes a ceiling.
+format_id() { # $1 = prefix, $2 = width, $3 = number
+    awk -v p="$1" -v w="$2" -v n="$3" 'BEGIN { printf "%s-%0*d\n", p, w, n }'
+}
+
+# Run one `frontmatter <mode>` pass over every decision file.
+#
+# Newline-split rather than a glob: the prefix is no longer a constant, so the
+# filter lives in is_decision_file. The subshell keeps IFS local, and the
+# single awk invocation the callers relied on is preserved.
+decision_frontmatter() { # $1 = root, $2 = mode
+    _root=$1
+    _mode=$2
+    (
+        IFS='
+'
+        # shellcheck disable=SC2046
+        set -- $(each_decision "$_root")
+        [ $# -gt 0 ] || exit 0
+        frontmatter "$_mode" "$@"
+    )
 }
 
 # Parse spec-file frontmatter — MANY files in a single awk pass, same per-file
@@ -357,6 +773,21 @@ spec_frontmatter() {
 
 
 cmd_init() {
+    prefix=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --prefix)
+                [ $# -ge 2 ] || die "--prefix needs a value"
+                prefix=$2
+                shift 2
+                ;;
+            --prefix=*)
+                prefix=${1#--prefix=}
+                shift
+                ;;
+            *) die "usage: zavet init [--prefix <PREFIX>]" ;;
+        esac
+    done
     top=$(repo_toplevel) || die "not inside a git repository"
     tpl="$(script_dir)/../templates"
     [ -d "$tpl" ] || die "templates not found at $tpl"
@@ -365,7 +796,14 @@ cmd_init() {
         printf 'zavet: %s already exists — nothing to do\n' "$dest"
         return 0
     fi
+    if [ -n "$prefix" ]; then
+        valid_prefix "$prefix" ||
+            die "invalid prefix '$prefix' — 1-$ZAVET_MAX_PREFIX uppercase chars, leading letter (e.g. ZAVET)"
+    else
+        prefix=$(derive_prefix "$top")
+    fi
     mkdir -p "$dest/decisions" "$dest/specs"
+    write_config "$dest/config" "$prefix" "" "$ZAVET_INIT_WIDTH"
     for t in INDEX.md RULES.md glossary.md; do
         cp "$tpl/$t" "$dest/$t"
     done
@@ -374,7 +812,54 @@ cmd_init() {
     cp "$tpl/decision.md" "$dest/.template.md"
     cp "$tpl/spec.md" "$dest/.spec-template.md"
     printf 'zavet: scaffolded %s\n' "$dest"
+    printf 'zavet: decision ids are %s — change it now with "zavet prefix <NEW>" if it reads wrong\n' \
+        "$(format_id "$prefix" "$ZAVET_INIT_WIDTH" 1)"
+    # A prefix a sibling already holds defeats the point of having one. Say so
+    # loudly here, where changing it is still free.
+    sibling_prefixes "$top" | while IFS="$(printf '\t')" read -r _ taken repo; do
+        [ "$taken" = "$prefix" ] || continue
+        printf 'zavet: WARNING — %s is already used by %s next door; two repos sharing a prefix is the ambiguity prefixes exist to remove (zavet suggest lists alternatives)\n' \
+            "$taken" "$repo" >&2
+    done
     printf 'zavet: next steps — edit RULES.md, then record your first decision (/zavet:decide)\n'
+}
+
+# Print or change the prefix NEW ids are minted with.
+#
+# Changing it NEVER touches existing records. Their ids are load-bearing in
+# commit trailers this command cannot rewrite, so the old prefix is retired
+# into `prefix-aliases` and stays resolvable forever. `id-width` is left alone
+# for the same reason: re-padding would re-key every id already minted.
+# Every prefix an id may carry, space-separated, minting prefix first. The
+# guard hook and any other consumer builds its trailer regex from this rather
+# than re-parsing config — one reader, zero drift.
+cmd_prefixes() {
+    root=$(zavet_root)
+    zavet_prefix_set "$root"
+}
+
+cmd_prefix() {
+    root=$(zavet_root)
+    old=$(zavet_prefix "$root")
+    if [ $# -eq 0 ]; then
+        printf '%s\n' "$old"
+        return 0
+    fi
+    new=$1
+    valid_prefix "$new" ||
+        die "invalid prefix '$new' — 1-$ZAVET_MAX_PREFIX uppercase chars, leading letter (e.g. ZAVET)"
+    if [ "$new" = "$old" ]; then
+        printf 'zavet: prefix is already %s\n' "$new"
+        return 0
+    fi
+    aliases=$(config_get "$root" prefix-aliases "")
+    case " $(printf '%s' "$aliases" | tr ',' ' ') " in
+        *" $old "*) ;;
+        *) aliases="${aliases:+$aliases, }$old" ;;
+    esac
+    write_config "$root/$ZAVET_DIR/config" "$new" "$aliases" "$(zavet_id_width "$root")"
+    printf 'zavet: prefix %s → %s (%s retired, still resolved on read)\n' "$old" "$new" "$old"
+    printf 'zavet: existing records keep their ids; the counter continues at %s\n' "$(cmd_next_id)"
 }
 
 # The next free decision id.
@@ -401,25 +886,25 @@ cmd_next_id() {
         git -C "$root" log --all --format= --name-only -- "$ZAVET_DIR/decisions" 2>/dev/null
     } | awk -F/ '{
         f = $NF
-        sub(/^D-/, "", f)
+        # ANY prefix, not just the one currently minting. The counter is
+        # global to the repo and continues across a `zavet prefix` change, so
+        # an id minted under a retired prefix still burns its number — the
+        # same append-only rule that makes history count alongside the tree.
+        sub(/^[A-Za-z][A-Za-z0-9]*-/, "", f)
         sub(/[-.].*$/, "", f)
         if (f ~ /^[0-9]+$/) { n = f + 0; if (n > max) max = n }
     } END { print max + 0 }')
-    printf 'D-%04d\n' $((max + 1))
+    format_id "$(zavet_prefix "$root")" "$(zavet_id_width "$root")" $((max + 1))
 }
 
 cmd_list() {
     root=$(zavet_root)
-    set -- "$root/$ZAVET_DIR"/decisions/D-*.md
-    [ -e "$1" ] || return 0
-    frontmatter meta "$@"
+    decision_frontmatter "$root" meta
 }
 
 cmd_guards() {
     root=$(zavet_root)
-    set -- "$root/$ZAVET_DIR"/decisions/D-*.md
-    [ -e "$1" ] || return 0
-    frontmatter guards "$@"
+    decision_frontmatter "$root" guards
 }
 
 # "id<TAB>label<TAB>command" for every decision, EVERY status. A guard is an
@@ -427,17 +912,13 @@ cmd_guards() {
 # claim about how the record was verified, which survives supersession.
 cmd_checks() {
     root=$(zavet_root)
-    set -- "$root/$ZAVET_DIR"/decisions/D-*.md
-    [ -e "$1" ] || return 0
-    frontmatter checks "$@"
+    decision_frontmatter "$root" checks
 }
 
 # "id<TAB>corrected-by" for decisions carrying an errata pointer.
 cmd_errata() {
     root=$(zavet_root)
-    set -- "$root/$ZAVET_DIR"/decisions/D-*.md
-    [ -e "$1" ] || return 0
-    frontmatter errata "$@"
+    decision_frontmatter "$root" errata
 }
 
 # One "## <heading>" section of a decision, body only. The guard hook uses
@@ -457,6 +938,182 @@ cmd_section() {
         }
         inside { print }
     ' "$root/$rel"
+}
+
+# Replace every standalone occurrence of one id with another, in place.
+#
+# Boundary-aware in both directions: a preceding alphanumeric keeps `CMD-0042`
+# out, and a following digit keeps `D-004` from matching inside `D-0042`. A
+# following `-` IS rewritten, so a `D-0042-slug.md` path reference in prose
+# follows the rename.
+#
+# Returns 0 when the file changed, 1 when it did not.
+rewrite_id_in_file() { # $1 = file, $2 = old id, $3 = new id
+    _tmp="$1.renumber.$$"
+    awk -v old="$2" -v new="$3" '
+        {
+            out = ""
+            line = $0
+            while ((i = index(line, old)) > 0) {
+                p = (i == 1) ? "" : substr(line, i - 1, 1)
+                q = substr(line, i + length(old), 1)
+                if (p ~ /[A-Za-z0-9]/ || q ~ /[A-Za-z0-9]/)
+                    out = out substr(line, 1, i + length(old) - 1)
+                else
+                    out = out substr(line, 1, i - 1) new
+                line = substr(line, i + length(old))
+            }
+            print out line
+        }
+    ' "$1" >"$_tmp" || {
+        rm -f "$_tmp"
+        return 1
+    }
+    if cmp -s "$1" "$_tmp"; then
+        rm -f "$_tmp"
+        return 1
+    fi
+    mv "$_tmp" "$1"
+}
+
+# Move a decision to a different id, rewriting every reference to it.
+#
+# There is exactly one safe window for this: a record still on an unmerged
+# branch. Once it is reachable from the base branch its id is load-bearing in
+# commit trailers — which this command cannot rewrite — so it refuses by
+# default. That window is also the only one that matters in practice, because
+# `zavet check` catches a duplicate id in CI, before the merge.
+cmd_renumber() {
+    _usage="usage: zavet renumber [--base <ref>] [--force] <old-id|path> <new-id>"
+    base="origin/HEAD"
+    force=0
+    old=""
+    new=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force)
+                force=1
+                shift
+                ;;
+            --base)
+                [ $# -ge 2 ] || die "--base needs a value"
+                base=$2
+                shift 2
+                ;;
+            --base=*)
+                base=${1#--base=}
+                shift
+                ;;
+            -*) die "$_usage" ;;
+            *)
+                if [ -z "$old" ]; then
+                    old=$1
+                elif [ -z "$new" ]; then
+                    new=$1
+                else
+                    die "$_usage"
+                fi
+                shift
+                ;;
+        esac
+    done
+    if [ -z "$old" ] || [ -z "$new" ]; then
+        die "$_usage"
+    fi
+    root=$(zavet_root)
+    dir="$root/$ZAVET_DIR/decisions"
+
+    # Resolve the record. Deliberately NOT cmd_decision_path: the case this
+    # command exists for is a duplicated id, which that refuses to resolve.
+    case "$old" in
+        */* | *.md)
+            src=$old
+            case "$src" in
+                /*) ;;
+                *) src="$root/$src" ;;
+            esac
+            [ -f "$src" ] || die "no such record: $old"
+            ;;
+        *)
+            set --
+            for f in "$dir/$old.md" "$dir/$old-"*.md; do
+                [ -e "$f" ] || continue
+                set -- "$@" "$f"
+            done
+            [ $# -gt 0 ] || die "no decision with id $old"
+            if [ $# -gt 1 ]; then
+                printf 'zavet: id %s is claimed by %s records — pass the path of the one to move:\n' "$old" "$#" >&2
+                for f in "$@"; do
+                    printf '  %s\n' "${f#"$root"/}" >&2
+                done
+                exit 1
+            fi
+            src=$1
+            ;;
+    esac
+
+    is_decision_file "${src##*/}" || die "not a decision record: ${src##*/}"
+    oldid=$(id_from_file "${src##*/}")
+    is_decision_file "$new.md" || die "invalid new id '$new' — expected <PREFIX>-<digits>"
+    [ "$new" != "$oldid" ] || die "$oldid is already its own id"
+    if decision_exists "$new"; then
+        die "id $new is already claimed — pick a free one (zavet next-id)"
+    fi
+
+    rel="${src#"$root"/}"
+    if git -C "$root" rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+        if git -C "$root" cat-file -e "$base:$rel" 2>/dev/null && [ "$force" -eq 0 ]; then
+            die "$oldid already exists on $base — its id is load-bearing in merged commit trailers, which this cannot rewrite. Record a correcting decision instead, or pass --force if you are certain no trailer references it."
+        fi
+    elif [ "$force" -eq 0 ]; then
+        printf 'zavet: %s does not resolve — skipping the merged-record check\n' "$base" >&2
+    fi
+
+    slug=${src##*/}
+    slug=${slug%.md}
+    dst="$dir/$new${slug#"$oldid"}.md"
+    if git -C "$root" ls-files --error-unmatch "$rel" >/dev/null 2>&1; then
+        git -C "$root" mv "$rel" "${dst#"$root"/}" || die "git mv failed"
+    else
+        mv "$src" "$dst" || die "mv failed"
+    fi
+
+    # Every reference, including the moved record's own `id:` frontmatter:
+    # `supersedes` / `superseded-by` / `corrected-by` in sibling records, spec
+    # `decisions:` lists, and inline refs in either body. INDEX.md is
+    # regenerated rather than rewritten.
+    oldifs=$IFS
+    IFS='
+'
+    # shellcheck disable=SC2046
+    set -- $(each_decision "$root") $(each_spec "$root")
+    IFS=$oldifs
+    [ -f "$root/$ZAVET_DIR/RULES.md" ] && set -- "$@" "$root/$ZAVET_DIR/RULES.md"
+    touched=0
+    for f in "$@"; do
+        if rewrite_id_in_file "$f" "$oldid" "$new"; then
+            touched=$((touched + 1))
+        fi
+    done
+
+    printf 'zavet: %s → %s (%s file(s) rewritten)\n' "$oldid" "$new" "$touched"
+    # Only when there is an index to regenerate. The rename has already
+    # happened by this point, so dying here would report failure for work that
+    # succeeded — the same tolerance cmd_index shows the specs block.
+    if [ -f "$root/$ZAVET_DIR/INDEX.md" ]; then
+        cmd_index
+    fi
+
+    # Commit trailers are history and cannot be rewritten here. Naming the
+    # commits is the honest move — silence would read as "handled".
+    if git -C "$root" rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+        hits=$(git -C "$root" log --oneline -E \
+            --grep="(Refs|Supersedes):[[:space:]]*$oldid([^0-9]|\$)" "$base..HEAD" 2>/dev/null)
+        if [ -n "$hits" ]; then
+            printf 'zavet: these commits still name %s in a trailer — amend or rebase them if they are unpushed:\n' "$oldid" >&2
+            printf '%s\n' "$hits" >&2
+        fi
+    fi
 }
 
 cmd_match() {
@@ -602,14 +1259,18 @@ decision_exists() {
 
 check_duplicate_ids() {
     root=$(zavet_root)
-    dups=$(each_decision "$root" | awk -F/ '
+    dups=$(each_decision "$root" | awk -F/ -v w="$(zavet_id_width "$root")" '
         {
             f = $NF
-            n = f
-            sub(/^D-/, "", n)
+            if (!match(f, /^[A-Za-z][A-Za-z0-9]*-/)) next
+            # Prefix uppercased and number re-padded, so `zavet-16` and
+            # `ZAVET-00016` collide — but `ZAVET-00016` and `CLI-00016` do
+            # not. A prefix is a namespace, not decoration.
+            p = toupper(substr(f, 1, RLENGTH - 1))
+            n = substr(f, RLENGTH + 1)
             sub(/[-.].*$/, "", n)
             if (n !~ /^[0-9]+$/) next
-            id = sprintf("D-%04d", n + 0)
+            id = sprintf("%s-%0*d", p, w, n + 0)
             files[id] = (id in seen) ? files[id] " " f : f
             seen[id] = 1
             count[id]++
@@ -622,7 +1283,16 @@ check_duplicate_ids() {
         printf 'violation-duplicate-id\t%s\n' "$row"
     done
     n=$(printf '%s\n' "$dups" | grep -c .)
-    printf 'zavet check: %s decision id(s) claimed by more than one record — rename the newer one and update its references.\n' "$n" >&2
+    printf 'zavet check: %s decision id(s) claimed by more than one record.\n' "$n" >&2
+    # The repair verbatim, because the fix is mechanical and always pre-merge:
+    # the loser is still on an unmerged branch, where renaming is safe. Each
+    # row gets its OWN free number — suggesting one id twice would just trade
+    # this collision for the next.
+    free=$(cmd_next_id)
+    printf '%s\n' "$dups" | awk -F'\t' \
+        -v pfx="${free%-*}" -v base="${free##*-}" -v w="$(zavet_id_width "$root")" '
+        { printf "  → sh bin/zavet renumber %s %s-%0*d\n", $1, pfx, w, base + NR - 1 }
+    ' >&2
     return 1
 }
 
@@ -682,8 +1352,11 @@ cmd_check() {
         return "$rc"
     fi
     # Commits already carrying a trailer never violate — their diffs are
-    # never even listed. Regexes verbatim from the guard-commit hook.
-    refs_set="$nl$(git rev-list --no-merges -E --grep='(Refs|Supersedes):[[:space:]]*D-[0-9]+' "$@" --)$nl"
+    # never even listed. Regexes verbatim from the guard-commit hook, with the
+    # prefix alternation built from this repo's config so a retired prefix in
+    # older commits still counts as compliance.
+    alt=$(zavet_prefix_alt "$top")
+    refs_set="$nl$(git rev-list --no-merges -E --grep="(Refs|Supersedes):[[:space:]]*($alt)-[0-9]+" "$@" --)$nl"
     spec_set="$nl$(git rev-list --no-merges -E --grep='Spec:[[:space:]]*[a-z0-9][a-z0-9-]*' "$@" --)$nl"
     violations=0
     warnings=0
@@ -793,11 +1466,8 @@ cmd_audit() {
     # never says how anyone would know it still holds. Reported, not failed —
     # plenty of real invariants are not mechanically checkable, and the point
     # is that the record SAYS so rather than leaving it assumed.
-    for f in "$root/$ZAVET_DIR"/decisions/D-*.md; do
-        [ -e "$f" ] || continue
-        id=${f##*/}
-        id=${id%%-*}
-        id=${id%.md}
+    each_decision "$root" | while IFS= read -r f; do
+        id=$(id_from_file "${f##*/}")
         grep -q '^## Agent directives' "$f" 2>/dev/null || continue
         printf '%s\n' "$checks_table" | awk -F '\t' -v i="$id" '$1 == i { found = 1 } END { exit !found }' && continue
         printf 'uncovered-invariant\t%s\t%s\n' "$id" "$(basename "$f")"
@@ -806,15 +1476,11 @@ cmd_audit() {
     # --- long records: the capture bar is about what a reader could not
     # reconstruct, not about length — but a record that has grown into a
     # feature spec is one nobody re-reads, and guards inject it verbatim.
-    for f in "$root/$ZAVET_DIR"/decisions/D-*.md; do
-        [ -e "$f" ] || continue
+    each_decision "$root" | while IFS= read -r f; do
         n=$(wc -l <"$f")
         n=$((n + 0))
         [ "$n" -gt 60 ] || continue
-        id=${f##*/}
-        id=${id%%-*}
-        id=${id%.md}
-        printf 'long-record\t%s\t%s\n' "$id" "$n"
+        printf 'long-record\t%s\t%s\n' "$(id_from_file "${f##*/}")" "$n"
     done
 
     # --- stale specs: commits touching a spec's paths since the spec file
@@ -1100,6 +1766,10 @@ shift
 case "$cmd" in
     init) cmd_init "$@" ;;
     root) zavet_root ;;
+    prefix) cmd_prefix "$@" ;;
+    prefixes) cmd_prefixes ;;
+    suggest) cmd_suggest ;;
+    renumber) cmd_renumber "$@" ;;
     next-id) cmd_next_id ;;
     list) cmd_list ;;
     guards) cmd_guards ;;

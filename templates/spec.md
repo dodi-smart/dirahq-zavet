@@ -17,7 +17,7 @@ date: 1970-01-01
 # not exist yet — staleness starts once commits touch them.
 paths:
   - path/or/glob/this/spec/covers/**
-# Decisions that shaped this feature. Optional — D-NNNN references anywhere
+# Decisions that shaped this feature. Optional — decision-id references anywhere
 # in the body are auto-linked too.
 decisions: []
 # Scenarios proving this feature still behaves, as `label :: command`. Same
@@ -45,7 +45,7 @@ Entry points, commands, schemas, wire formats, storage.
 
 ## Invariants
 
-What must stay true. Reference the decisions behind them (D-NNNN) — the ids
+What must stay true. Reference the decisions behind them by id — the ids
 auto-link.
 
 ## Open Questions

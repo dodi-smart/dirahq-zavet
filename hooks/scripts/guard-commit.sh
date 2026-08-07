@@ -2,7 +2,8 @@
 # PreToolUse gate for Bash `git commit` — one hook, one parse, two checks:
 #
 #  - Guard WALL: commits touching guarded paths must reference the guarding
-#    decision with a `Refs: D-NNNN` or `Supersedes: D-NNNN` trailer.
+#    decision with a `Refs: <ID>` or `Supersedes: <ID>` trailer, where <ID>
+#    carries any prefix this repo mints or has retired (see `zavet prefixes`).
 #  - Spec NUDGE (once per spec per session): staged work covered by a living
 #    spec should keep it current — stage the updated .zavet/specs/<slug>.md
 #    or carry a `Spec: <slug>` trailer. Blocks once with instructions, then
@@ -46,6 +47,14 @@ nl='
 '
 reasons=""
 
+# Trailer ids carry this repo's prefix, plus any retired by `zavet prefix` —
+# an older commit referencing a retired prefix is still compliance. Built from
+# `zavet prefixes` rather than re-parsing config here: one reader, no drift.
+# Fail-open to the historical prefix if the lookup goes wrong.
+prefix_alt=$(cd -- "$root" && "$ZAVET" prefixes 2>/dev/null | tr ' ' '|')
+[ -n "$prefix_alt" ] || prefix_alt="D"
+id_re="($prefix_alt)-[0-9]+"
+
 # --- Guard wall -------------------------------------------------------------
 guarded=$(printf '%s\n' "$staged" | (cd -- "$root" && "$ZAVET" match-batch 2>/dev/null) | tr '\n' ' ')
 guarded=${guarded% }
@@ -53,12 +62,12 @@ if [ -n "$guarded" ]; then
     # The agent commits with -m/heredoc, so the trailer is visible in the
     # command string. Amends/editor commits without an inline message are
     # conservatively treated as unreferenced.
-    if printf '%s' "$cmd" | grep -qE '(Refs|Supersedes):[[:space:]]*D-[0-9]+'; then
+    if printf '%s' "$cmd" | grep -qE "(Refs|Supersedes):[[:space:]]*$id_re"; then
         for id in $guarded; do
             (cd -- "$root" && "$ZAVET" emit guard_complied "$id" "") 2>/dev/null || true
         done
-        if printf '%s' "$cmd" | grep -qE 'Supersedes:[[:space:]]*D-[0-9]+'; then
-            sup=$(printf '%s' "$cmd" | grep -oE 'Supersedes:[[:space:]]*D-[0-9]+' | head -1 | grep -oE 'D-[0-9]+')
+        if printf '%s' "$cmd" | grep -qE "Supersedes:[[:space:]]*$id_re"; then
+            sup=$(printf '%s' "$cmd" | grep -oE "Supersedes:[[:space:]]*$id_re" | head -1 | grep -oE "$id_re")
             # shellcheck disable=SC2015
             [ -n "$sup" ] && (cd -- "$root" && "$ZAVET" emit decision_superseded "$sup" "") 2>/dev/null || true
         fi
