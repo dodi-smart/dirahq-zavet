@@ -1,5 +1,7 @@
 ---
-id: D-0000
+# The id `zavet next-id` handed out — this repo's prefix plus the next free
+# number. Never edit it by hand; use `zavet renumber` if it has to change.
+id: PREFIX-0000
 title: Short imperative summary of the decision
 status: active
 # Guard globs: `*` and `**` both cross directory boundaries (so `src/*.rs`
@@ -16,7 +18,7 @@ checks:
 # Set by a LATER record that corrects one claim here; leave it off until then.
 # This record stays `active` and keeps its body — corrections annotate,
 # supersession replaces.
-# corrected-by: D-0000
+# corrected-by: PREFIX-0000
 origin: recorded
 verified: true
 ---

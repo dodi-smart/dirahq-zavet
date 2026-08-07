@@ -40,7 +40,7 @@ All flows:
 - Frontmatter exactly per the template: `title`, `version`, `origin`,
   `verified`, `confidence`, `date` (today), `paths` (git pathspecs, as narrow
   as honest), optional `decisions:` list.
-- Reference the decisions that shaped the feature — `decisions: [D-NNNN]`
+- Reference the decisions that shaped the feature — `decisions: [<ID>]`
   and/or inline D-refs in the body; both auto-link when dira captures the
   spec. Link from the spec, never by editing decision records.
 - Regenerate the index: `sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" index`

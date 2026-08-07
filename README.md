@@ -13,13 +13,14 @@ time, agent wall-clock, tokens) that produced it.
 
 ## What it does
 
-- **Decision records** — append-only `D-NNNN` markdown files in
+- **Decision records** — append-only `<PREFIX>-NNNN` markdown files in
   `.zavet/decisions/`, under 60 lines: decision, why, rejected alternatives,
-  agent directives. Superseding is explicit and tracked; rewriting history is
-  not possible by convention or hook. A record that only needs ONE claim
-  corrected gets `corrected-by: D-MMMM` and stays `active` — every recall path
-  then leads with the correction, instead of the reader hitting the wrong
-  claim first.
+  agent directives. The prefix is per repo (`CLOUD-00042`, `CLI-00007`), so an
+  id stays unambiguous when several repos sit under one project. Superseding is
+  explicit and tracked; rewriting history is not possible by convention or
+  hook. A record that only needs ONE claim corrected gets
+  `corrected-by: <NEW-ID>` and stays `active` — every recall path then leads
+  with the correction, instead of the reader hitting the wrong claim first.
 - **Checks** — a record can say *how* its invariants are verified, as
   `label :: command`. The command is opaque: any runner, any stack, exit 0 is
   pass, no output is parsed. `zavet verify` runs them; nothing else does.
@@ -96,7 +97,7 @@ silently no-op without it). `dira` is optional.
 | Command | Purpose |
 |---|---|
 | `/zavet:init` | Scaffold `.zavet/{INDEX.md,RULES.md,decisions/,specs/,glossary.md}` |
-| `/zavet:decide` | Record a structural decision as an append-only `D-NNNN` record with guards |
+| `/zavet:decide` | Record a structural decision as an append-only `<PREFIX>-NNNN` record with guards |
 | `/zavet:why` | Answer a "why" question from recorded knowledge, with citations (and time cost via dira when present) |
 | `/zavet:wiki` | Browse the knowledge base wiki-style — rules, decisions, glossary, recent rationale |
 | `/zavet:backfill` | Reverse-engineer an existing codebase into decision records — proposed to you first, written as `verified: false` hypotheses with open questions, never invented rationale |
@@ -106,27 +107,114 @@ silently no-op without it). `dira` is optional.
 
 The `bin/zavet` helper is also usable directly (and from CI) — run
 `bin/zavet help` for the full usage text:
-`init · root · next-id · list · guards · checks · errata · match <path> ·
-match-batch · decision-path <id> · section <id> <heading> · specs ·
-spec-paths · spec-checks · spec-match · check <range> · verify · audit ·
-index · deny <reason> · emit <kind> <id> [file] · version [--json]`.
+`init [--prefix P] · root · prefix [<NEW>] · prefixes ·
+renumber [--base <ref>] [--force] <old> <new> · next-id · list · guards ·
+checks · errata · match <path> · match-batch · decision-path <id> ·
+section <id> <heading> · specs · spec-paths · spec-checks · spec-match ·
+check <range> · verify · audit · index · deny <reason> ·
+emit <kind> <id> [file] · version [--json]`.
+
+## Decision ids
+
+An id is `<PREFIX>-<number>`. The prefix belongs to the repo and lives in
+`.zavet/config`:
+
+```
+prefix: CLOUD
+prefix-aliases: D
+id-width: 5
+```
+
+### Deriving one
+
+A prefix has to carry the **product**, not just the role. `cloud`, `cli`,
+`web` and `api` are exactly the segments that repeat across sibling repos, so
+keying on the last segment hands them all the same prefix — the ambiguity
+prefixes exist to remove. So the default is a product stem plus a canonical
+role code:
+
+| repo | prefix | why |
+|---|---|---|
+| `dirahq-cloud` | `DIRABE` | `dira` + backend (`cloud`/`server`/`api` all mean backend) |
+| `dirahq-cli` | `DIRASH` | `dira` + shell |
+| `dirahq-zavet` | `ZAVET` | no role segment — the name *is* the identity |
+| `teamschedule/time-schedule-application` | `TIMEAP` | `schedule` echoes the org, so `time` is what distinguishes it |
+| `infrasensing-supabase-platform` | `INFRPF` | `supabase` is stack, not identity |
+
+Segments are classified rather than truncated. Corporate noise (`hq`, `inc`,
+`labs`) is dropped, including as a suffix *inside* a segment — that is how
+`DIRAHQ` becomes `DIRA`. Stack names (`supabase`, `react`, `postgres`) are
+dropped too: they describe how a thing is built, not what it is. Role words
+map to a short code — `BE FE SH AP PF WK GW LIB DOC` — and the stem takes
+whatever the six-character budget leaves.
+
+Tokens that merely echo the org are dropped, because inside one workspace they
+disambiguate nothing. The org comes from the remote's owner, falling back to
+the parent directory name, so `~/src/teamschedule/time-schedule-application`
+derives the same as a fresh clone. A repo named after its own org keeps its
+name rather than deriving from the role alone.
+
+`zavet suggest` prints the ranked candidates with their rationale, plus any
+prefix a **sibling repo already holds** — one level up, reading `.zavet/config`
+only, offline. `/zavet:init` puts that list in front of you before scaffolding,
+because a rule can only lower the odds of a collision; reading the siblings
+detects one.
+
+**A repo with no `.zavet/config` mints plain `D-NNNN` at width 4, exactly as
+before prefixes existed.** Nothing to migrate: adopting a prefix is per repo
+and opt-in.
+
+`zavet prefix <NEW>` changes only what FUTURE ids are minted with. Existing
+records are never renamed — their ids are load-bearing in commit trailers
+already in the log — so the old prefix is retired into `prefix-aliases`, where
+it stays resolvable forever, and the counter continues unbroken (`D-0041` is
+followed by `CLOUD-0042`). Numbers are never reused, across prefixes or after
+a deletion.
+
+`id-width` is fixed when the repo is scaffolded (new repos get 5, config-less
+repos stay at 4). It is a key, not a display choice: an id minted at one width
+would never join a shorthand ref resolved at another.
+
+### When two branches claim one id
+
+Ids are chosen per branch, so this is possible; `zavet check` catches it in CI
+against the merge result and prints the repair:
+
+```
+violation-duplicate-id	CLOUD-00042	CLOUD-00042-ours.md CLOUD-00042-theirs.md
+  → sh bin/zavet renumber CLOUD-00042 CLOUD-00043
+```
+
+`zavet renumber` moves the record, rewrites its own `id:`, every
+`supersedes` / `superseded-by` / `corrected-by` pointer, spec `decisions:`
+lists and inline refs, and regenerates the index. It **refuses** a record
+already reachable from the base branch (`--base`, default `origin/HEAD`),
+because from that point the id is referenced by commit trailers it cannot
+rewrite — correct that with a new decision, not a rename. It also cannot
+rewrite trailers in your own local commits, so it names them and leaves the
+amend to you.
 
 ## CI enforcement
 
 `zavet check` is the enforcement floor for machines without hooks: over a
 commit range, any non-merge commit whose changed files match an **active
-guard glob** must carry a `Refs: D-NNNN` or `Supersedes: D-NNNN` trailer in
-its commit message — exactly the rule the commit hook applies interactively.
+guard glob** must carry a `Refs: <ID>` or `Supersedes: <ID>` trailer in its
+commit message — exactly the rule the commit hook applies interactively. `<ID>`
+may carry any prefix the repo mints or has retired, so commits predating a
+`zavet prefix` change stay compliant.
 Commits touching **spec-covered paths** without a `Spec: <slug>` trailer
 produce warnings only (the hook is a nudge; CI is not stricter).
 
 Two tree-wide checks run on every invocation, whatever the range covers,
 because both are properties of the records rather than of the commits:
 
-- **duplicate ids** — two records claiming one `D-NNNN`. Ids are chosen per
-  branch, so two branches open at once can both pick the same number; in CI
-  this runs against the merge result, so the collision fails the PR instead of
-  landing. Compared canonically, so `D-7` cannot hide behind `D-0007`.
+- **duplicate ids** — two records claiming one id. Ids are chosen per branch,
+  so two branches open at once can both pick the same number; in CI this runs
+  against the merge result, so the collision fails the PR instead of landing,
+  and the summary names the `zavet renumber` command that repairs it. Compared
+  canonically within a prefix, so `CLOUD-7` cannot hide behind `CLOUD-00007` —
+  and across prefixes it is not a collision at all, since `CLOUD-00007` and
+  `CLI-00007` are different decisions.
 - **dangling `corrected-by`** — a pointer naming a record that does not exist.
 
 Exit code `1` on any of the three; repos without `.zavet/` pass, so one
@@ -149,8 +237,9 @@ free id from the working tree **and every decision filename that has ever
 existed on any ref**, so a shallow clone that cannot see the other branches
 hands out an id someone else already took. History counts as well as the
 current tree — ids are append-only, and a deleted record still burns its
-number, or the `Refs: D-NNNN` trailers already in the log would start pointing
-at a different decision.
+number, or the `Refs:` trailers already in the log would start pointing at a
+different decision. The scan counts every prefix the repo has ever minted, so
+retiring one does not reset the counter.
 
 That scan is best-effort by construction: a branch this clone has never
 fetched is invisible to it. The duplicate-id check above is the guarantee —
@@ -265,8 +354,8 @@ verified: true
 ```
 
 Status transitions are append-only: the only permitted mutations are
-`status: superseded` + `superseded-by: D-MMMM` (the record is REPLACED), and
-`corrected-by: D-MMMM` (one claim inside it is wrong; the record stays
+`status: superseded` + `superseded-by: <NEW-ID>` (the record is REPLACED), and
+`corrected-by: <NEW-ID>` (one claim inside it is wrong; the record stays
 `active` and its body is untouched). Both are frontmatter-only. `zavet check`
 fails on a `corrected-by` naming a record that does not exist.
 

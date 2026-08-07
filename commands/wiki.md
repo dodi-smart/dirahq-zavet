@@ -20,4 +20,4 @@ Present this repo's recorded knowledge as a readable wiki page. Topic: $ARGUMENT
    superseded history, and notable recent trailers. Cite ids everywhere; mark
    anything `verified: false` as **unverified — hypothesis**, never as fact.
 4. Offer natural next steps: `/zavet:why <question>` for a specific "why",
-   `dira zavet why D-NNNN` for a decision's full record + time cost.
+   `dira zavet why <ID>` for a decision's full record + time cost.
