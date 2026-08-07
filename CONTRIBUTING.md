@@ -41,10 +41,26 @@ Pull requests whose commits are not signed off will be asked to amend.
   `shellcheck bin/zavet hooks/scripts/*.sh test/*.sh scripts/*.sh` before opening a PR — this
   repo's equivalent of dira's `just ci`. Everything shipped here is POSIX `sh`; there is no
   compile step, so these two commands are the whole local gate.
+- The GitHub runner's `shellcheck` tracks a **newer build than the released one** most people
+  have installed, and it reports findings a release does not, so a clean local run can still
+  fail CI. To check against the version CI actually runs:
+  `docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:latest bin/zavet hooks/scripts/*.sh test/*.sh scripts/*.sh`
 - If your change touches `test/fixtures/dialect/`, also run `sh test/sync-check.sh` and read
   its [`README.md`](test/fixtures/dialect/README.md) first — those fixtures are a
   byte-identical, MANIFEST-guarded mirror of a Rust implementation in a different repo, not
   free-standing test data.
+- **`.agents/skills/` is generated — never hand-edit it.** If your change touches
+  `commands/*.md` or `skills/zavet/SKILL.md`, run `sh scripts/gen-adapters.sh` and commit the
+  result. Those files are the canonical prose; `.agents/skills/` is the portable
+  [Agent Skills](https://agentskills.io) form derived from them, which is how zavet reaches
+  Grok Build, Codex, Cursor and the rest. The `adapters-sync` CI job runs
+  `sh scripts/gen-adapters.sh --check` and fails on drift, because two copies of a workflow
+  that teach different things both look fine in review.
+- If you add or rename a workflow, update the `COMMANDS` list in
+  `scripts/gen-adapters.sh` **and** the `skills` array in
+  `.claude-plugin/marketplace.json` — the array is what `npx skills add` reads to find them,
+  so a skill missing from it is silently not installed. `test/run.sh` asserts every declared
+  path exists, but nothing can tell you about a skill you forgot to declare.
 - Contributions to this repository are licensed under Apache-2.0.
 - "Zavet", "Dira", and their logos are trademarks of Dodi Smart OOD and are not licensed for
   use in derivative or competing products.

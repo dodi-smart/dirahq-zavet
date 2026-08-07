@@ -42,15 +42,36 @@ time, agent wall-clock, tokens) that produced it.
 - **Session context** — standing rules, the decision index, and the living
   specs are injected at session start, so agents begin every session knowing
   what has been decided.
+- **Cross-harness** — the workflows ship as [Agent
+  Skills](https://agentskills.io), so they run on Claude Code, Grok Build,
+  Codex, Cursor, Gemini CLI, OpenCode, Copilot and ~70 other harnesses. Guards
+  hold for every teammate regardless of what they run: natively where the
+  harness has a blocking hook, and through a `commit-msg` git hook plus CI
+  everywhere else. See [Cross-harness support](#cross-harness-support).
 
 Everything is plain markdown + git. No daemon, no cloud, no lock-in: the
 `.zavet/` directory is fully functional offline and readable without any tool.
 
 ## Install
 
-Zavet is a Claude Code plugin, installed from this repo's marketplace
-manifest (`.claude-plugin/marketplace.json`). Pick whichever of these three
-paths fits how you work — they all end at the same installed plugin.
+Two halves, installed independently:
+
+1. **Your harness** needs zavet's workflows. Claude Code takes them as a plugin;
+   everything else takes them as Agent Skills.
+2. **Your repo** needs its knowledge layer and its enforcement wiring —
+   `/zavet:init`, once, committed. Every teammate then gets it from the clone,
+   whatever they run.
+
+| Your harness | Install |
+|---|---|
+| Claude Code | `/plugin install zavet@dirahq` (below) |
+| Grok Build, Codex, Cursor, Gemini CLI, OpenCode, Copilot, Amp, Factory, … | `npx skills add dodi-smart/dirahq-zavet` |
+
+### Claude Code
+
+Installed from this repo's marketplace manifest
+(`.claude-plugin/marketplace.json`). Pick whichever of these three paths fits how
+you work — they all end at the same installed plugin.
 
 **Interactive (Claude Code REPL):**
 
@@ -83,14 +104,87 @@ Every install path takes an optional `--scope <user|project|local>` (default
 `user`); see `claude plugin install --help`. **Claude Code must be restarted
 after install** for the plugin's commands and hooks to become active.
 
-Then, in a repo you want to track:
+### Every other harness
+
+The same eight workflows are published as [Agent
+Skills](https://agentskills.io) under `.agents/skills/`, installed with the
+ecosystem's own installer:
+
+```sh
+npx skills add dodi-smart/dirahq-zavet
+```
+
+It auto-detects the harnesses you have installed and wires the skills into each
+one's directory, symlinked to a single canonical copy. Useful flags: `-a grok`
+(or `codex`, `cursor`, …) to target one harness, `-g` for user-wide instead of
+this project, `--copy` where symlinks are not available, and `npx skills update`
+to refresh. The skills are `zavet` plus `zavet-init`, `zavet-decide`,
+`zavet-why`, `zavet-wiki`, `zavet-backfill`, `zavet-spec`, `zavet-audit` and
+`zavet-verify` — invoke them the way your harness invokes skills (`/zavet-why`
+on most, `$zavet-why` in Codex).
+
+This path works for Claude Code too, if you would rather not install a plugin.
+You lose the live hooks; you keep the workflows.
+
+### Then, in each repo
 
 ```
 /zavet:init
 ```
 
+Scaffolds `.zavet/` **and** the cross-harness layer: a vendored
+`.zavet/bin/zavet`, an `AGENTS.md` block, `.grok/rules/` + `.grok/hooks/`, and
+`.zavet/githooks/`. Commit all of it — that is what makes the repo's guards
+hold for teammates on other harnesses. Then activate the git-hook floor:
+
+```sh
+.zavet/bin/zavet hooks install
+```
+
 Requirements: `git`, POSIX `sh`, `awk`. Hooks additionally use `jq` (they
 silently no-op without it). `dira` is optional.
+
+## Cross-harness support
+
+Zavet is built for Claude Code and Grok Build first, and degrades honestly
+everywhere else. The table is what was actually verified against each harness's
+documentation and, for Grok Build, its source — not what ought to work.
+
+| | Claude Code | Grok Build | Cursor | Codex / Gemini / OpenCode / Copilot / … |
+|---|---|---|---|---|
+| Workflows as slash commands | plugin `commands/` | `.agents/skills/` | `.agents/skills/` | `.agents/skills/` |
+| Ambient knowledge skill | plugin `skills/` | `.agents/skills/` | `.agents/skills/` | `.agents/skills/` |
+| Knowledge index in context | **live** — SessionStart hook | **live** — `.grok/rules/zavet.md` | `AGENTS.md` | `AGENTS.md` |
+| Index refreshed mid-session | next session | **yes** | no | no |
+| Teach-before-change on edit | **yes** | **yes** | unverified¹ | no — check by hand² |
+| Commit guard wall | **yes**, live | **yes**, live | **yes**, live | git `commit-msg` |
+| CI enforcement | `zavet check` | `zavet check` | `zavet check` | `zavet check` |
+
+**Claude Code and Grok Build are both first-class.** Both deny a guarded edit
+and show you the record; both block an untrailered commit; both carry the
+decision index in context from the first turn. Grok's index is arguably the
+better of the two — Claude Code's is injected once at session start, while Grok
+re-reads its project rules on every prompt build, so a decision recorded
+mid-session shows up without a restart. Grok gates project hooks behind folder
+trust, so run `/hooks-trust` (or launch with `--trust`) once per repo; until you
+do, Grok skips them silently.
+
+¹ Cursor's docs confirm that `beforeShellExecution` can deny, which is what the
+commit wall needs, but do not say whether `preToolUse` can deny a file edit. The
+hook is wired either way: if it can, the guard behaves as it does on Claude Code
+and Grok Build; if it cannot, the hook is a no-op and the git-hook floor is what
+holds. Enable it with `zavet adapters --cursor`.
+
+² Nothing intercepts the edit, so the ambient skill and `AGENTS.md` both instruct
+the agent to run `.zavet/bin/zavet match <path>` before editing. The commit is
+still caught — by the `commit-msg` hook locally and `zavet check` in CI — but by
+then the code is already written against an unread decision. This is the real
+gap, and it is a limit of those harnesses, not of the guard.
+
+**The wall is one implementation.** Every surface above calls `zavet gate`, and
+`zavet check` shares its trailer patterns. A repo cannot enforce one rule in the
+agent loop and a different one at `git commit`, or teach a rule locally that CI
+then rejects.
 
 ## Commands
 
@@ -107,12 +201,26 @@ silently no-op without it). `dira` is optional.
 
 The `bin/zavet` helper is also usable directly (and from CI) — run
 `bin/zavet help` for the full usage text:
-`init [--prefix P] · root · prefix [<NEW>] · prefixes ·
+`init [--prefix P] · root · bin · prefix [<NEW>] · prefixes ·
 renumber [--base <ref>] [--force] <old> <new> · next-id · list · guards ·
 checks · errata · match <path> · match-batch · decision-path <id> ·
 section <id> <heading> · specs · spec-paths · spec-checks · spec-match ·
-check <range> · verify · audit · index · deny <reason> ·
+check <range> · gate · verify · audit · index · context · rules [--check] ·
+agents-md [--check] · adapters [--check] [--cursor] · hooks [install|--check] ·
+hook <kind> · deny [--format claude|grok|cursor] <reason> ·
 emit <kind> <id> [file] · version [--json]`.
+
+The cross-harness subcommands, in the order you would meet them:
+
+| Command | Purpose |
+|---|---|
+| `zavet adapters [--check] [--cursor]` | Write (or drift-check) everything a repo needs off Claude Code: the vendored CLI, the `AGENTS.md` block, `.grok/rules/` + `.grok/hooks/`, the git-hook templates, and optionally `.cursor/hooks.json`. Run by `zavet init`; re-run after upgrading the plugin. |
+| `zavet hooks install` | Point `core.hooksPath` at `.zavet/githooks` to activate the enforcement floor. Refuses to take over a `core.hooksPath` that already belongs to Husky or lefthook, and prints the one line to add instead. |
+| `zavet gate` | The guard wall over a prospective commit — staged paths plus the message it is about to carry. What every hook calls. |
+| `zavet hook <kind>` | Run a guard over a harness event on stdin (`guard-edit`, `guard-commit`, `refresh`). The generated hook configs call this. |
+| `zavet rules` / `zavet agents-md` | Regenerate one context file. `zavet index` does both, so you rarely call these directly; `--check` is for CI. |
+| `zavet context` | The session-start payload on stdout, for a harness whose SessionStart hook can inject it. |
+| `zavet bin` | Print the resolved zavet executable (`$ZAVET_BIN` → `.zavet/bin/zavet` → `PATH` → `$CLAUDE_PLUGIN_ROOT/bin/zavet`). |
 
 ## Decision ids
 
@@ -292,6 +400,11 @@ release, not a same-day fix:
    default branch — see [Releases](#releases--versioning)).
 3. **Executable surface** — `bin/zavet` at the plugin root, supporting
    `version` and `version --json` (see [Version compatibility](#version-compatibility)).
+   Also the hook-denial envelope: `zavet deny <reason>` and
+   `zavet deny --format claude <reason>` are byte-identical to each other and to
+   every build that predates formats. `--format grok` and `--format cursor` are
+   additive — new shapes for new harnesses, never a change to the default.
+   `test/run.sh` pins the exact default string.
 4. **Wire format** — the guard-event schema on stdin of `dira zavet emit` is
    `v: 1` (see [Guard event schema](#guard-event-schema-v1) above).
 
@@ -389,6 +502,20 @@ Recording an invariant with no check is fine — many genuinely cannot be
 checked. Recording one and saying nothing about verification is not, because
 silence reads as coverage; `zavet audit` reports those as
 `uncovered-invariant`.
+
+`zavet audit` also reports the cross-harness layer, because every way it breaks
+is silent:
+
+| Row | Means |
+|---|---|
+| `adapter-missing` | No `AGENTS.md` block or `.grok/rules/zavet.md`. Agents off Claude Code see no decisions at all — which reads as "this repo has none". Run `zavet adapters`. |
+| `adapter-stale` | The generated index no longer matches the records. Worse than missing: a stale index reads as authoritative, so an agent will confidently cite a decision that was superseded three commits ago. |
+| `adapter-ignored` | The file is gitignored. Grok Build's rules discovery honors `.gitignore` (its *skill* discovery deliberately does not), so the file is invisible on every machine, including the one that wrote it. |
+| `githook-floor` | `core.hooksPath` does not point at `.zavet/githooks`, so the wall is not enforced for anyone whose harness has no hook API. An unenforced floor looks exactly like a compliant repo until someone commits over a guard. |
+
+`zavet check` warns on `adapter-stale` too, but never fails the build over it —
+the file is derived and one command repairs it, and failing a PR over a derived
+artifact just teaches people to ignore the check.
 
 **Honesty rule:** knowledge reconstructed from existing code is marked
 `origin: reverse-engineered`, `verified: false`, with open questions instead of
