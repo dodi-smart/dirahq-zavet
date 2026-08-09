@@ -64,7 +64,7 @@ Usage:
                               trailer; warn on spec-covered paths without a
                               Spec: trailer (exit 1 only on violations)
   zavet gate [--staged] [--paths-from <f|->] [--message <text>]
-             [--message-file <f>] [--session <id>] [--emit]
+             [--message-file <f>] [--session <id>] [--emit[=live|git]]
              [--guards-only|--nudge-only]
                               THE guard wall over one prospective commit: the
                               staged paths plus its message. Prints the reason
@@ -72,6 +72,8 @@ Usage:
                               0 silently otherwise. Every enforcement surface
                               (live harness hooks, the commit-msg git hook)
                               calls this, so they cannot drift apart.
+                              --emit=git reports the guard_*_git kinds, so a
+                              repo running both surfaces never double-counts.
   zavet audit                 Report stale specs, stale decisions, and guard
                               pressure as TAB-separated rows (report-only)
   zavet index                 Regenerate .zavet/INDEX.md, plus the generated
@@ -1592,6 +1594,13 @@ cmd_gate() {
     message=""
     session=""
     do_emit=0
+    # Which surface caught the commit becomes part of the event kind. A repo can
+    # run the live hook AND the git floor at once — that is the recommended setup
+    # on Claude Code, since the floor also catches commits made outside the agent
+    # loop — and dira's `zavet_guard_events` has no uniqueness constraint to
+    # collapse a duplicate. Distinct kinds let both surfaces report without
+    # either being lost or silently double-counted.
+    emit_suffix=""
     want_guards=1
     want_nudge=1
     while [ $# -gt 0 ]; do
@@ -1624,10 +1633,21 @@ cmd_gate() {
                 session=$2
                 shift 2
                 ;;
-            --emit) do_emit=1; shift ;;
+            # Bare --emit keeps meaning exactly what it means today, so every
+            # live hook is untouched.
+            --emit) do_emit=1; emit_suffix=""; shift ;;
+            --emit=*)
+                do_emit=1
+                case "${1#--emit=}" in
+                    live) emit_suffix="" ;;
+                    git) emit_suffix="_git" ;;
+                    *) die "--emit=<source>: expected 'live' or 'git'" ;;
+                esac
+                shift
+                ;;
             --guards-only) want_nudge=0; shift ;;
             --nudge-only) want_guards=0; shift ;;
-            *) die "usage: zavet gate [--staged|--paths-from <f|->] [--message <text>|--message-file <f>] [--session <id>] [--emit] [--guards-only|--nudge-only]" ;;
+            *) die "usage: zavet gate [--staged|--paths-from <f|->] [--message <text>|--message-file <f>] [--session <id>] [--emit[=live|git]] [--guards-only|--nudge-only]" ;;
         esac
     done
     top=$(repo_toplevel) || return 0
@@ -1651,18 +1671,22 @@ cmd_gate() {
             if printf '%s' "$message" | grep -qE "$refs_re"; then
                 if [ "$do_emit" -eq 1 ]; then
                     for id in $guarded; do
-                        cmd_emit guard_complied "$id" "" 2>/dev/null || true
+                        cmd_emit "guard_complied$emit_suffix" "$id" "" 2>/dev/null || true
                     done
                     if printf '%s' "$message" | grep -qE "Supersedes:[[:space:]]*$id_re"; then
                         sup=$(printf '%s' "$message" | grep -oE "Supersedes:[[:space:]]*$id_re" | head -1 | grep -oE "$id_re")
+                        # Suffixed like the guard kinds, even though a supersession
+                        # is a fact about a decision rather than about the surface
+                        # that noticed it: counted twice it reads as two separate
+                        # replacements, which is worse than most double-counts.
                         # shellcheck disable=SC2015
-                        [ -n "$sup" ] && cmd_emit decision_superseded "$sup" "" 2>/dev/null || true
+                        [ -n "$sup" ] && cmd_emit "decision_superseded$emit_suffix" "$sup" "" 2>/dev/null || true
                     fi
                 fi
             else
                 if [ "$do_emit" -eq 1 ]; then
                     for id in $guarded; do
-                        cmd_emit guard_blocked "$id" "" 2>/dev/null || true
+                        cmd_emit "guard_blocked$emit_suffix" "$id" "" 2>/dev/null || true
                     done
                 fi
                 first=${guarded%% *}
@@ -2555,9 +2579,13 @@ ctx_render_githook_commit_msg() { # $1 = root
 #
 # The guard wall, for harnesses with no hook API. Same rule as the live hooks
 # and as \`zavet check\` in CI: one implementation, in \`zavet gate\`.
+#
+# \`--emit=git\` reports to dira under the \`_git\` kinds, so a repo running both
+# this floor and a live harness hook records both surfaces without either being
+# mistaken for the other.
 set -u
 [ -x "\$(dirname -- "\$0")/../bin/zavet" ] || exit 0
-reason=\$("\$(dirname -- "\$0")/../bin/zavet" gate --staged --message-file "\$1" --guards-only) && exit 0
+reason=\$("\$(dirname -- "\$0")/../bin/zavet" gate --staged --message-file "\$1" --guards-only --emit=git) && exit 0
 [ -n "\$reason" ] || exit 0
 printf 'zavet: commit blocked by the guard wall.\\n\\n%s\\n\\n' "\$reason" >&2
 printf 'Add the trailer to your commit message and commit again.\\n' >&2
@@ -2699,7 +2727,7 @@ cmd_hooks() {
         printf 'zavet: core.hooksPath is already %s — not taking it over.\n' "$_hp" >&2
         printf 'zavet: add this line to %s/commit-msg instead:\n' "$_hp" >&2
         # shellcheck disable=SC2016
-        printf '  %s gate --staged --message-file "$1" --guards-only >&2 || exit 1\n' "$ZAVET_BIN_REL" >&2
+        printf '  %s gate --staged --message-file "$1" --guards-only --emit=git >&2 || exit 1\n' "$ZAVET_BIN_REL" >&2
         return 1
     fi
     [ -f "$root/$ZAVET_GITHOOKS_DIR/commit-msg" ] || die "no $ZAVET_GITHOOKS_DIR/ — run: zavet adapters"

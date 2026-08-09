@@ -158,6 +158,7 @@ documentation and, for Grok Build, its source — not what ought to work.
 | Index refreshed mid-session | next session | **yes** | no | no |
 | Teach-before-change on edit | **yes** | **yes** | unverified¹ | no — check by hand² |
 | Commit guard wall | **yes**, live | **yes**, live | **yes**, live | git `commit-msg` |
+| Guard events to dira | `guard_*` | `guard_*` | `guard_*` | `guard_*_git`³ |
 | CI enforcement | `zavet check` | `zavet check` | `zavet check` | `zavet check` |
 
 **Claude Code and Grok Build are both first-class.** Both deny a guarded edit
@@ -180,6 +181,12 @@ the agent to run `.zavet/bin/zavet match <path>` before editing. The commit is
 still caught — by the `commit-msg` hook locally and `zavet check` in CI — but by
 then the code is already written against an unread decision. This is the real
 gap, and it is a limit of those harnesses, not of the guard.
+
+³ The `commit-msg` floor reports to dira under its own kinds, so a repo running
+both it and a live hook — the recommended setup on Claude Code, since the floor
+also catches commits made outside the agent loop — records both surfaces
+without one commit being counted as two. See
+[Guard event schema](#guard-event-schema-v1).
 
 **The wall is one implementation.** Every surface above calls `zavet gate`, and
 `zavet check` shares its trailer patterns. A repo cannot enforce one rule in the
@@ -372,7 +379,7 @@ What the hooks send to `dira zavet emit` on stdin:
 ```json
 {
   "v": 1,
-  "kind": "guard_shown | guard_blocked | guard_complied | guard_overridden | decision_superseded",
+  "kind": "guard_shown | guard_blocked | guard_complied | guard_overridden | decision_superseded (each guard/superseded kind also has a _git form — see below)",
   "decision_id": "D-0042",
   "file_path": "src/auth/session.ts",
   "cwd": "/abs/path/inside/repo",
@@ -384,6 +391,18 @@ What the hooks send to `dira zavet emit` on stdin:
 unknown kinds are stored verbatim. The daemon resolves the repo from `cwd` and
 never trusts a caller-supplied repo identity. Delivery is best-effort: a
 missing daemon, an older dira, or a dropped event must never affect the hooks.
+
+**The surface is part of the kind.** The `commit-msg` git hook — the
+[enforcement floor](#cross-harness-support) for harnesses with no hook API —
+emits `guard_blocked_git`, `guard_complied_git` and `decision_superseded_git`.
+A repo can legitimately run both surfaces at once: the live hook catches the
+agent's commit, the git floor also catches a terminal `git commit`, an IDE
+commit button, a `git rebase --continue`. `zavet_guard_events` has no
+uniqueness constraint that would collapse one commit reported twice, so the two
+surfaces are named apart instead — nothing is lost, and nothing is silently
+counted twice. Aggregation groups by `kind` with no fixed list, so the `_git`
+kinds appear on their own row (`12 blocked · 3 blocked_git`) with no dira
+release. Folding the two for display is a dira-side choice.
 
 ## Integration contract (stable)
 

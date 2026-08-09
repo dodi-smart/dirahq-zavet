@@ -1213,15 +1213,19 @@ printf '\n' >>"$DIRA_EVENT_LOG"
 FAKE
 chmod 755 "$TMP/fakebin/dira"
 
-emitted() { # $1 = commit message -> the event kinds zavet fired, space-separated
+event_kinds() { # -> the kinds recorded in DIRA_EVENT_LOG, sorted, space-separated
+    tr ',' '\n' <"$DIRA_EVENT_LOG" | sed -n 's/.*"kind":"\([a-z_]*\)".*/\1/p' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+emitted() { # $1 = commit message, $2 = optional --emit form -> the kinds fired
     DIRA_EVENT_LOG="$TMP/events.log"
     export DIRA_EVENT_LOG
     : >"$DIRA_EVENT_LOG"
-    (cd "$R" && PATH="$TMP/fakebin:$PATH" sh "$Z" gate --staged --emit --message "$1") >/dev/null 2>&1
+    (cd "$R" && PATH="$TMP/fakebin:$PATH" sh "$Z" gate --staged "${2:---emit}" --message "$1") >/dev/null 2>&1
     # `zavet emit` backgrounds the pipe to dira so a slow daemon can never stall
     # a hook, so the write lands after gate exits. One second is generous.
     sleep 1
-    tr ',' '\n' <"$DIRA_EVENT_LOG" | sed -n 's/.*"kind":"\([a-z_]*\)".*/\1/p' | sort -u | tr '\n' ' ' | sed 's/ $//'
+    event_kinds
 }
 
 assert_eq "a Refs: trailer emits guard_complied" "guard_complied" \
@@ -1236,6 +1240,27 @@ assert_eq "a Supersedes: trailer emits BOTH complied and superseded" \
 Supersedes: D-0001')"
 assert_eq "an untrailered commit emits guard_blocked" "guard_blocked" \
     "$(emitted 'feat: no trailer')"
+
+# REGRESSION: the git floor must report under its OWN kinds. A repo can run both
+# the live hook and the floor — recommended on Claude Code, since the floor also
+# catches commits made outside the agent loop — and `zavet_guard_events` has no
+# uniqueness constraint, so sharing kinds would silently double-count one commit.
+# `--emit` alone must keep meaning what it means today, or every live hook moves.
+assert_eq "--emit=git suffixes the blocked kind" "guard_blocked_git" \
+    "$(emitted 'feat: no trailer' --emit=git)"
+assert_eq "--emit=git suffixes complied" "guard_complied_git" \
+    "$(emitted 'feat: x
+
+Refs: D-0001' --emit=git)"
+assert_eq "--emit=git suffixes superseded too, so a replacement cannot count twice" \
+    "decision_superseded_git guard_complied_git" \
+    "$(emitted 'feat: x
+
+Supersedes: D-0001' --emit=git)"
+assert_eq "--emit=live is the explicit spelling of bare --emit" "guard_blocked" \
+    "$(emitted 'feat: no trailer' --emit=live)"
+(cd "$R" && sh "$Z" gate --staged --emit=bogus --message 'feat: x') >/dev/null 2>&1
+assert_eq "an unknown --emit source is an error, not a silent bare emit" "1" "$?"
 unset DIRA_EVENT_LOG
 
 # --- git hook floor -------------------------------------------------------
@@ -1250,6 +1275,27 @@ gc commit -qm "feat: x
 Refs: D-0001" >/dev/null 2>&1
 assert_eq "commit-msg passes a trailered commit" "0" "$?"
 assert_eq "and the commit really landed" "feat: x" "$(gc log -1 --format=%s)"
+
+# The floor is the ONLY enforcement surface on Codex, Gemini CLI, OpenCode and
+# Copilot, so if the generated hook loses `--emit=git` those harnesses go dark
+# in dira and `dira zavet why <ID>` reports their guards as never having fired.
+# Asserting through a real `git commit` covers the template, not just the flag.
+echo z >"$R/src/a.rs"
+gc add -A >/dev/null 2>&1
+DIRA_EVENT_LOG="$TMP/events-githook.log"
+export DIRA_EVENT_LOG
+: >"$DIRA_EVENT_LOG"
+(cd "$R" && PATH="$TMP/fakebin:$PATH" git commit -qm "feat: no trailer") >/dev/null 2>&1
+sleep 1
+assert_eq "the commit-msg hook emits guard_blocked_git" "guard_blocked_git" "$(event_kinds)"
+
+: >"$DIRA_EVENT_LOG"
+(cd "$R" && PATH="$TMP/fakebin:$PATH" git commit -qm "feat: y
+
+Refs: D-0001") >/dev/null 2>&1
+sleep 1
+assert_eq "and guard_complied_git on a trailered one" "guard_complied_git" "$(event_kinds)"
+unset DIRA_EVENT_LOG
 
 # Refusing to hijack someone else's hooksPath. Husky, lefthook and pre-commit
 # all own that setting; repointing it silently would disable every hook the
