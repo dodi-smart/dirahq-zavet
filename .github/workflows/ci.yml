@@ -66,19 +66,23 @@ jobs:
       # was renamed, the repo went private again), so it should stop the build
       # rather than print a warning nobody reads.
       #
-      # Unauthenticated GitHub API calls are rate-limited to 60/hr per IP, which
-      # is shared across the runner's egress. If this starts flaking on rate
-      # limits rather than drift, add an Authorization header using the
-      # workflow's own GITHUB_TOKEN — not a cross-repo PAT; the resource is
-      # public now and needs no special grant.
+      # Fetched over raw.githubusercontent.com rather than the contents API,
+      # because the API path did exactly what the note here used to only
+      # anticipate: it started returning 403 on a URL that fetches fine
+      # anonymously from anywhere else. Unauthenticated API calls are limited
+      # to 60/hr per IP, shared across the runner's egress, so a neighbour's
+      # traffic failed this job. raw has no such quota and needs no token, and
+      # it keeps a failure meaning what this job wants it to mean — the path
+      # moved, the branch was renamed, the repo went private again — instead of
+      # "someone else on this runner used up the quota". It is CDN-cached for
+      # about five minutes, which is nothing against drift measured in releases.
       - name: canonical MANIFEST in dirahq-cli matches
         env:
-          CANONICAL_URL: https://api.github.com/repos/dodi-smart/dirahq-cli/contents/cli/core/testdata/zavet-dialect/MANIFEST?ref=develop
+          CANONICAL_URL: https://raw.githubusercontent.com/dodi-smart/dirahq-cli/develop/cli/core/testdata/zavet-dialect/MANIFEST
         run: |
           set -eu
           out="$RUNNER_TEMP/canonical-manifest"
-          curl -fsSL -H "Accept: application/vnd.github.raw" \
-               -H "X-GitHub-Api-Version: 2022-11-28" "$CANONICAL_URL" -o "$out"
+          curl -fsSL "$CANONICAL_URL" -o "$out"
           echo "canonical MANIFEST fetched; diffing"
           diff -u "$out" test/fixtures/dialect/MANIFEST
 
