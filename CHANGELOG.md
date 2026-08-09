@@ -1,3 +1,13 @@
+## [1.4.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.3.0...v1.4.0) (2026-08-09)
+
+### ✨ Features
+
+* **plugin:** report guard events from the git-hook floor under _git kinds ([3db2558](https://github.com/dodi-smart/dirahq-zavet/commit/3db2558032069d549a322f0de2729cc147f67b2a)), closes [#13](https://github.com/dodi-smart/dirahq-zavet/issues/13)
+
+### 🐛 Bug Fixes
+
+* **ci:** fetch the canonical MANIFEST over raw, not the rate-limited API ([e36fbed](https://github.com/dodi-smart/dirahq-zavet/commit/e36fbed8e6e0af10ca16c3c47db2f556f2e96ca2))
+
 ## [1.3.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.2.0...v1.3.0) (2026-08-07)
 
 ### ✨ Features

@@ -1,6 +1,6 @@
 {
   "name": "zavet",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Repo-local knowledge layer: append-only decision records, guard hooks that teach agents before they change guarded code, and git commit trailers — optionally correlated with dira time tracking.",
   "author": {
     "name": "DODI SMART OOD",
