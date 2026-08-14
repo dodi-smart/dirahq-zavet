@@ -16,6 +16,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: run test suite
@@ -23,6 +24,7 @@ jobs:
 
   shellcheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
@@ -36,6 +38,7 @@ jobs:
   adapters-sync:
     name: generated skills match their sources
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: .agents/skills is up to date
@@ -43,6 +46,7 @@ jobs:
 
   fixture-sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: vendored fixtures match MANIFEST
@@ -82,7 +86,7 @@ jobs:
         run: |
           set -eu
           out="$RUNNER_TEMP/canonical-manifest"
-          curl -fsSL "$CANONICAL_URL" -o "$out"
+          curl -fsSL --max-time 30 --retry 2 "$CANONICAL_URL" -o "$out"
           echo "canonical MANIFEST fetched; diffing"
           diff -u "$out" test/fixtures/dialect/MANIFEST
 
@@ -100,6 +104,7 @@ jobs:
   manifest-check:
     name: plugin manifest sanity
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:

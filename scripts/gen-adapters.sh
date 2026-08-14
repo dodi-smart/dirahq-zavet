@@ -193,6 +193,26 @@ emit() { # $1 = skill dir name, $2 = renderer, $3... = renderer args
     wrote=1
 }
 
+# Fail loudly before any generation starts, rather than trusting emit() to
+# catch it: render_command_skill's/render_ambient_skill's last step is a
+# pipeline like `fm_body "$_src" | portable_body`, and a pipeline's exit
+# status is the LAST command's (portable_body/sed), not fm_body's — so if
+# `$_src` is missing or unreadable, awk's "can't open file" on stderr is
+# swallowed, sed still exits 0 on empty input, and emit() would happily write
+# an empty, spec-invalid SKILL.md and report success. Checking readability of
+# every source up front turns that into one clear, early failure instead.
+for slug in $COMMANDS; do
+    src="commands/$slug.md"
+    [ -r "$src" ] || {
+        printf 'gen-adapters: missing or unreadable source: %s\n' "$src" >&2
+        exit 1
+    }
+done
+[ -r "skills/zavet/SKILL.md" ] || {
+    printf 'gen-adapters: missing or unreadable source: skills/zavet/SKILL.md\n' >&2
+    exit 1
+}
+
 emit zavet render_ambient_skill
 for slug in $COMMANDS; do
     emit "zavet-$slug" render_command_skill "$slug"
