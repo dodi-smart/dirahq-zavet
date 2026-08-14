@@ -1,3 +1,13 @@
+## [1.4.1](https://github.com/dodi-smart/dirahq-zavet/compare/v1.4.0...v1.4.1) (2026-08-14)
+
+### 🐛 Bug Fixes
+
+* **plugin:** close guard-wall bypasses, id-counter inflation, and per-edit refresh churn ([fdf79a3](https://github.com/dodi-smart/dirahq-zavet/commit/fdf79a350bf7c99e8f566b6d776dce41fbaa3989))
+
+### 👷 Continuous Integration
+
+* **plugin:** bound fixture-sync and fail gen-adapters loudly on a missing source ([fe8d83d](https://github.com/dodi-smart/dirahq-zavet/commit/fe8d83d2f5cd2b77f7149121d88a82abed854eed))
+
 ## [1.4.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.3.0...v1.4.0) (2026-08-09)
 
 ### ✨ Features
