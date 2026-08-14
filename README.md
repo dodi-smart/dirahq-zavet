@@ -208,7 +208,7 @@ then rejects.
 
 The `bin/zavet` helper is also usable directly (and from CI) — run
 `bin/zavet help` for the full usage text:
-`init [--prefix P] · root · bin · prefix [<NEW>] · prefixes ·
+`init [--prefix P] · root · bin · prefix [<NEW>] · prefixes · suggest ·
 renumber [--base <ref>] [--force] <old> <new> · next-id · list · guards ·
 checks · errata · match <path> · match-batch · decision-path <id> ·
 section <id> <heading> · specs · spec-paths · spec-checks · spec-match ·
@@ -297,7 +297,7 @@ against the merge result and prints the repair:
 
 ```
 violation-duplicate-id	CLOUD-00042	CLOUD-00042-ours.md CLOUD-00042-theirs.md
-  → sh bin/zavet renumber CLOUD-00042 CLOUD-00043
+  → sh bin/zavet renumber .zavet/decisions/CLOUD-00042-theirs.md CLOUD-00043
 ```
 
 `zavet renumber` moves the record, rewrites its own `id:`, every
