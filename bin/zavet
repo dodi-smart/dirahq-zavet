@@ -934,10 +934,17 @@ cmd_init() {
     done
     # The cross-harness layer is scaffolded at init, not left as an opt-in
     # afterthought: a repo whose guards only bind the harness that happened to
-    # run `init` is exactly the gap this exists to close.
-    cmd_adapters >/dev/null || true
-    printf 'zavet: cross-harness adapters written (AGENTS.md, %s, %s)\n' \
-        "$ZAVET_GROK_RULES" "$ZAVET_GITHOOKS_DIR"
+    # run `init` is exactly the gap this exists to close. A failure here must
+    # not fail `init` itself — the scaffold above already landed and is the
+    # load-bearing part; adapters are re-runnable on their own (`zavet
+    # adapters`), so this only downgrades the summary line, never the exit
+    # status.
+    if cmd_adapters >/dev/null; then
+        printf 'zavet: cross-harness adapters written (AGENTS.md, %s, %s)\n' \
+            "$ZAVET_GROK_RULES" "$ZAVET_GITHOOKS_DIR"
+    else
+        printf 'zavet: adapters not written — run zavet adapters\n' >&2
+    fi
     printf 'zavet: next steps — edit RULES.md, run "zavet hooks install", then record your first decision (/zavet:decide)\n'
 }
 
@@ -1001,15 +1008,30 @@ cmd_next_id() {
     max=$({
         each_decision "$root"
         git -C "$root" log --all --format= --name-only -- "$ZAVET_DIR/decisions" 2>/dev/null
-    } | awk -F/ '{
+    } | LC_ALL=C awk -F/ -v cap="$ZAVET_MAX_PREFIX" '{
         f = $NF
         # ANY prefix, not just the one currently minting. The counter is
         # global to the repo and continues across a `zavet prefix` change, so
         # an id minted under a retired prefix still burns its number — the
         # same append-only rule that makes history count alongside the tree.
-        sub(/^[A-Za-z][A-Za-z0-9]*-/, "", f)
-        sub(/[-.].*$/, "", f)
-        if (f ~ /^[0-9]+$/) { n = f + 0; if (n > max) max = n }
+        #
+        # each_decision already filters to the is_decision_file shape; git
+        # history does not — any file ever committed under decisions/ on any
+        # fetched ref lands in this stream. So this half re-checks the same
+        # shape (uppercase prefix, capped length, digit id, .md) or a stray
+        # `notes-99999.md` would inflate the counter forever. LC_ALL=C above
+        # keeps [A-Z] ASCII-only — see valid_prefix for why a UTF-8 locale
+        # cannot be trusted with that range.
+        if (f !~ /\.md$/) next
+        i = index(f, "-")
+        if (i == 0) next
+        pfx = substr(f, 1, i - 1)
+        if (pfx !~ /^[A-Z][A-Z0-9]*$/ || length(pfx) > cap) next
+        n = substr(f, i + 1)
+        sub(/[-.].*$/, "", n)
+        if (n !~ /^[0-9]+$/) next
+        n = n + 0
+        if (n > max) max = n
     } END { print max + 0 }')
     format_id "$(zavet_prefix "$root")" "$(zavet_id_width "$root")" $((max + 1))
 }
@@ -1437,10 +1459,20 @@ check_duplicate_ids() {
     # the loser is still on an unmerged branch, where renaming is safe. Each
     # row gets its OWN free number — suggesting one id twice would just trade
     # this collision for the next.
+    #
+    # The bare id is unusable here — cmd_renumber refuses to resolve one
+    # claimed by ≥2 records by design, so the hint must name a PATH instead.
+    # The claiming filenames are already on the row; pick the last one
+    # sorted (each_decision walks the glob in that order, so the first is
+    # arguably the keeper) for a deterministic, always-resolving suggestion.
     free=$(cmd_next_id)
     printf '%s\n' "$dups" | awk -F'\t' \
-        -v pfx="${free%-*}" -v base="${free##*-}" -v w="$(zavet_id_width "$root")" '
-        { printf "  → sh bin/zavet renumber %s %s-%0*d\n", $1, pfx, w, base + NR - 1 }
+        -v pfx="${free%-*}" -v base="${free##*-}" -v w="$(zavet_id_width "$root")" \
+        -v dir="$ZAVET_DIR/decisions" '
+        {
+            n = split($2, files, " ")
+            printf "  → sh bin/zavet renumber %s/%s %s-%0*d\n", dir, files[n], pfx, w, base + NR - 1
+        }
     ' >&2
     return 1
 }
@@ -2086,8 +2118,16 @@ cmd_index() {
 # reads as authoritative.
 #
 # Three writers keep it current, so no single one is load-bearing: `zavet
-# index` (below), a SessionStart hook, and a PostToolUse hook on .zavet/ edits.
-# `zavet check` reports drift, so CI catches a repo that stopped regenerating.
+# index` (below), a SessionStart hook, and a PostToolUse hook that fires on
+# EVERY tool call. Grok's matchers are tool-name only, with no path filter, so
+# the wiring cannot restrict the hook to .zavet/ edits — `zavet hook refresh`
+# does that scoping itself, in the command: it reads the payload's file path
+# (when one is present) and no-ops silently for anything outside .zavet/, and
+# skips the mv entirely when the freshly rendered bytes already match what is
+# on disk. So a session of edits elsewhere in the repo costs one cheap
+# render-and-compare per edit, not a rewrite, and a decision recorded mid-
+# session still shows up the moment something under .zavet/ changes. `zavet
+# check` reports drift, so CI catches a repo that stopped regenerating.
 
 # The payload itself — one builder, so the two files and the hook cannot
 # disagree about what this repo has decided.
@@ -2219,9 +2259,23 @@ ctx_render_agents_md() { # $1 = root
 # Render, then move into place. Silent — the implicit refresh from `zavet index`
 # uses this, and a decision recorded in a read-only checkout must not make
 # `/zavet:decide` look like it failed.
+#
+# A render that reproduces the target byte-for-byte skips the mv entirely.
+# Every caller still sees success — the file on disk is already what a write
+# would have produced — but nothing touches its mtime. That matters most for
+# `hook refresh`, which can run after every edit for the length of a session:
+# without this, an otherwise-unchanged decision index would still churn two
+# files' mtimes dozens of times a session. Explicit callers (`zavet rules`,
+# `zavet agents-md`, `zavet adapters`, `zavet index`) are unaffected — they
+# print their "wrote"/"refreshed" message regardless, and the bytes on disk
+# end up identical either way.
 ctx_write() { # $1 = renderer, $2 = root, $3 = repo-relative path
     _t="${TMPDIR:-/tmp}/zavet-ctxw.$$"
     "$1" "$2" >"$_t" 2>/dev/null || { rm -f "$_t"; return 1; }
+    if [ -f "$2/$3" ] && cmp -s "$_t" "$2/$3" 2>/dev/null; then
+        rm -f "$_t"
+        return 0
+    fi
     mkdir -p "$(dirname -- "$2/$3")" 2>/dev/null || { rm -f "$_t"; return 1; }
     mv "$_t" "$2/$3" 2>/dev/null || { rm -f "$_t"; return 1; }
 }
@@ -2461,8 +2515,22 @@ hook_guard_commit() { # $1 = json, $2 = flavor
     # The cheap gate first — the overwhelming majority of shell calls exit here.
     # "commit" must appear as a standalone token in a `git …` segment, which
     # admits `git -C . commit` while `git log --grep=commit` passes untouched.
+    # The boundary classes cover compact separators (`;&|`) and command-
+    # substitution/subshell openers (`(` and a backtick) on both sides, not
+    # just whitespace, so `git commit;echo`, `x=$(git commit -m x)`, and
+    # `` X=`git commit -m x` `` all still land on this gate. An optional single
+    # or double quote is allowed hugging "commit" so `git "commit" -m x` and
+    # `git 'commit' -m x` match too. A git ALIAS (`git ci`) is a known, accepted
+    # miss of this cheap text gate — the commit-msg git-hook floor catches those
+    # on the real commit, so the bypass is closed, just not at this layer.
+    # ACCEPTED over-trigger: the same boundary classes also catch PROSE, e.g. a
+    # backtick-quoted `git commit` inside an unrelated command (a heredoc body
+    # naming it, say). That adjacency is textually identical to a live command
+    # substitution, so a text gate cannot tell them apart — narrowing the regex
+    # to spare prose would reopen the substitution bypass. A visible wrongful
+    # deny beats a silent missed commit, so this stays a deny by design.
     printf '%s\n' "$_cmd" |
-        grep -qE '(^|[;&|[:space:]])git[[:space:]]([^;&|]*[[:space:]])?commit([[:space:]]|$)' || return 0
+        grep -qE '(^|[;&|(`[:space:]])git[[:space:]]([^;&|]*[[:space:]])?["'\''"]?commit["'\''"]?([;&|)`[:space:]]|$)' || return 0
     _cwd=$(hook_field "$1" '.cwd' '.workspaceRoot' '.workspace_roots[0]') || _cwd="."
     [ -d "$_cwd" ] || _cwd="."
     _session=$(hook_field "$1" '.session_id' '.sessionId' '.conversation_id') || _session="nosession"
@@ -2753,13 +2821,55 @@ cmd_hook() {
         esac
     done
 
-    # `refresh` needs no envelope and no jq: it is the side-effect-only hook
-    # that keeps the generated context files current for harnesses whose
-    # session-start stdout is discarded. Its OUTPUT is worthless and its write
-    # is the entire point.
+    # `refresh` needs no envelope and no jq to DO its job: it is the
+    # side-effect-only hook that keeps the generated context files current for
+    # harnesses whose session-start stdout is discarded. Its OUTPUT is
+    # worthless and its write is the entire point. jq/the payload are used only
+    # to SCOPE the work, and both are optional — see below.
+    #
+    # Grok wires this same command to PostToolUse(matcher search_replace) with
+    # no path filter (Grok matchers are tool-name only), so without scoping it
+    # re-renders and re-writes both generated files after every edit anywhere
+    # in the repo, all session. Neither file's content can depend on anything
+    # outside .zavet/, so that work is pure waste on every edit but the ones
+    # that matter — and the point of running mid-session at all is so a
+    # decision recorded mid-session shows up without waiting for the next
+    # SessionStart.
+    #
+    # Read stdin exactly once, the same fail-open way hook_guard_edit does
+    # below: SessionStart may pipe nothing at all, an older Grok build may omit
+    # tool_input, jq may be absent. Any of those just means no path could be
+    # extracted, which is treated as "scope unknown" rather than an error —
+    # refresh runs unconditionally, exactly as it did before this scoping
+    # existed.
     if [ "$_kind" = "refresh" ]; then
         top=$(repo_toplevel) || return 0
         [ -d "$top/$ZAVET_DIR" ] || return 0
+
+        _json=$(cat 2>/dev/null) || _json=""
+        _hfile=""
+        if [ -n "$_json" ] && command -v jq >/dev/null 2>&1; then
+            _hfile=$(hook_field "$_json" '.tool_input.file_path' '.tool_input.notebook_path' \
+                '.toolInput.file_path' '.toolInput.notebook_path' '.toolInput.path' \
+                '.file_path' '.path') || _hfile=""
+        fi
+
+        if [ -n "$_hfile" ]; then
+            # A path WAS extracted — this is a real PostToolUse call, not
+            # SessionStart. Strip the repo root when the path is absolute so
+            # both spellings land in the same case pattern; a path outside the
+            # repo entirely (no "$top/" prefix, and not already .zavet/...)
+            # falls through to the `*)` arm below like anything else external.
+            case "$_hfile" in
+                "$top"/*) _hrel=${_hfile#"$top"/} ;;
+                *) _hrel=$_hfile ;;
+            esac
+            case "$_hrel" in
+                "$ZAVET_DIR"/*) ;; # under .zavet/ — refresh below
+                *) return 0 ;;     # cannot have changed generated content
+            esac
+        fi
+
         for _pair in "ctx_render_rules $ZAVET_GROK_RULES" "ctx_render_agents_md $ZAVET_AGENTS_MD"; do
             _fn=${_pair%% *}
             _rel=${_pair#* }

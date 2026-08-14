@@ -3,16 +3,24 @@
 #
 #   sh test/run.sh
 #
-# Four suites, all through the public `bin/zavet` interface:
-#   dialect — fixture corpus vs the golden TSVs (the cross-parser contract
-#             shared with dira-core; see fixtures/dialect/README.md)
-#   matcher — run_match glob semantics (** collapse, trailing /, dedup)
-#   check   — the CI trailer floor over real commit ranges
-#   audit   — staleness + guard-pressure sweeps over real history
-#   verify  — running recorded checks (the one command that executes repo
-#             content), plus section extraction and the guard-injection budget
-#   ids     — decision-id collisions: next-id across refs, duplicate detection,
-#             and the refusal to resolve an ambiguous id
+# Eleven suites, all through the public `bin/zavet` interface:
+#   dialect  — fixture corpus vs the golden TSVs (the cross-parser contract
+#              shared with dira-core; see fixtures/dialect/README.md)
+#   matcher  — run_match glob semantics (** collapse, trailing /, dedup)
+#   check    — the CI trailer floor over real commit ranges
+#   audit    — staleness + guard-pressure sweeps over real history
+#   version  — `zavet version`'s manifest lookup, independent of git or .zavet/
+#   verify   — running recorded checks (the one command that executes repo
+#              content), plus section extraction and the guard-injection budget
+#   ids      — decision-id collisions: next-id across refs and history,
+#              duplicate detection, and the refusal to resolve an ambiguous id
+#   prefix   — `zavet prefix`/`init --prefix`: minting, retirement, sibling
+#              collisions, and the renumber repair path duplicates print
+#   hooks    — the guard-commit git hook, which fails open by design
+#   adapters — the cross-harness layer: generated files vs their source,
+#              per-harness deny envelopes, and the agent-loop-vs-commit wall
+#   harness envelopes — per-harness deny envelope shapes: claude/grok/cursor
+#              detection and formats
 set -u
 
 # shellcheck disable=SC1007
@@ -490,6 +498,21 @@ gc commit -qm "delete it" >/dev/null 2>&1
 assert_eq "a deleted id is never reissued" "D-0003" "$( (cd "$R" && sh "$Z" next-id) )"
 gc checkout -q - 2>/dev/null
 
+# History is UNFILTERED — any file ever committed under decisions/ on any
+# fetched ref lands in the same scan, unlike the tree half which
+# is_decision_file already keeps clean. A stray non-decision filename must
+# not be mistaken for a record and inflate the counter.
+gc checkout -q -b junk 2>/dev/null
+printf 'not a decision record\n' >"$R/.zavet/decisions/notes-99999.md"
+printf 'also not a decision record\n' >"$R/.zavet/decisions/readme-2024-old.md"
+gc add -A >/dev/null 2>&1
+gc commit -qm "junk landed under decisions/ by mistake" >/dev/null 2>&1
+gc rm -q ".zavet/decisions/notes-99999.md" ".zavet/decisions/readme-2024-old.md" >/dev/null 2>&1
+gc commit -qm "remove the junk" >/dev/null 2>&1
+gc checkout -q - 2>/dev/null
+assert_eq "junk filenames in history never inflate next-id" "D-0003" \
+    "$( (cd "$R" && sh "$Z" next-id) )"
+
 # --- what a bad merge leaves behind: two records, one id.
 R="$TMP/ids-dup"
 new_repo "$R"
@@ -818,9 +841,9 @@ gc add -A >/dev/null 2>&1
 gc commit -qm "merge landed two pairs" >/dev/null 2>&1
 base=$(gc rev-parse HEAD)
 err=$( (cd "$R" && sh "$Z" check "$base..$base" 2>&1 >/dev/null) )
-assert_eq "each duplicate row gets its OWN free id" \
-    "  → sh bin/zavet renumber ACME-0001 ACME-0003
-  → sh bin/zavet renumber ACME-0002 ACME-0004" \
+assert_eq "each duplicate row gets its OWN free id, by path" \
+    "  → sh bin/zavet renumber .zavet/decisions/ACME-0001-theirs.md ACME-0003
+  → sh bin/zavet renumber .zavet/decisions/ACME-0002-theirs.md ACME-0004" \
     "$(printf '%s\n' "$err" | grep 'renumber')"
 # An ambiguous id is refused rather than silently picking a record...
 if (cd "$R" && sh "$Z" renumber ACME-0001 ACME-0003) >/dev/null 2>&1; then
@@ -939,6 +962,55 @@ Refs: ACME-0002"' s6)"
     else
         fail "hook still blocks an untrailered commit after a prefix change"
     fi
+
+    # REGRESSION: the cheap detection regex used to require whitespace (or
+    # start/end of string) around `git … commit`, so a separator glued
+    # directly onto "commit" — or a command substitution/subshell opener
+    # right before "git" — walked straight past the gate. That is a SILENT
+    # ALLOW of an untrailered commit touching a guarded path, not a fail-open
+    # miss: worse than blocking too much. Each of these is untrailered and
+    # touches src/**, so every one must still DENY.
+    i=0
+    # shellcheck disable=SC2016 # these are literal command TEXT under test, not meant to expand
+    for cmd in \
+        'git commit;echo done' \
+        'x=$(git commit -m "x")' \
+        'git "commit" -m "x"' \
+        'X=`git commit -m "x"`'
+    do
+        i=$((i + 1))
+        out=$(hook_out "$cmd" "sre-bypass-$i")
+        if printf '%s' "$out" | grep -q '"permissionDecision":"deny"'; then
+            pass "hook still denies a compact/quoted bypass form: $cmd"
+        else
+            fail "hook still denies a compact/quoted bypass form: $cmd"
+            printf '  actual: %s\n' "$out"
+        fi
+    done
+
+    # PINNED: a prose mention of `git commit` inside an unrelated command (a
+    # heredoc body, here) sits backtick-adjacent to the tokens, which is
+    # textually identical to a live command substitution — see the "ACCEPTED
+    # over-trigger" note above hook_guard_commit's regex in bin/zavet. This
+    # DENY is deliberate, not a bug: a future "fix" that narrows the regex to
+    # dodge this prose case will fail this assertion and must confront that
+    # ruling first.
+    # shellcheck disable=SC2016 # literal command TEXT under test, not meant to expand
+    out=$(hook_out 'cat >> notes.md <<'"'"'EOF'"'"'
+Use `git commit` after editing.
+EOF' sre-prose)
+    if printf '%s' "$out" | grep -q '"permissionDecision":"deny"'; then
+        pass "hook pins the deliberate prose-mention over-trigger as a DENY"
+    else
+        fail "hook pins the deliberate prose-mention over-trigger as a DENY"
+        printf '  actual: %s\n' "$out"
+    fi
+
+    # The standalone-token property must survive the widened boundary classes:
+    # "commit" appearing inside another word, or as a --grep value, is still
+    # not a `git commit` invocation and must stay silent.
+    assert_eq "hook still ignores --grep=commit" "" "$(hook_out 'git log --grep=commit' sre-grep)"
+    assert_eq "hook still ignores a bare echo of the word commit" "" "$(hook_out 'echo commit' sre-echo)"
 fi
 
 # ------------------------------------------------------------- adapters ----
@@ -972,6 +1044,38 @@ for f in AGENTS.md .grok/rules/zavet.md .grok/hooks/zavet.json \
         pass "adapters writes $f"
     else
         fail "adapters writes $f"
+    fi
+done
+
+# --- --cursor opt-in --------------------------------------------------------
+# `zavet adapters --cursor` had zero test coverage. Cursor support is opt-in
+# (see cmd_adapters/adapters_table), so the flag must be the only way in: a
+# fresh repo that never asked for it must not get a Cursor hook file it cannot
+# audit for, and a repo that asks for it must get the real generated content,
+# not just a file that happens to exist.
+if [ -f "$R/.cursor/hooks.json" ]; then
+    fail "plain adapters (no --cursor) does NOT create .cursor/hooks.json"
+else
+    pass "plain adapters (no --cursor) does NOT create .cursor/hooks.json"
+fi
+
+RC="$TMP/adapters-cursor"
+new_repo "$RC"
+cp "$ROOT/templates/RULES.md" "$RC/.zavet/RULES.md"
+(cd "$RC" && sh "$Z" adapters --cursor) >/dev/null 2>&1
+if [ -f "$RC/.cursor/hooks.json" ]; then
+    pass "adapters --cursor writes .cursor/hooks.json"
+else
+    fail "adapters --cursor writes .cursor/hooks.json"
+fi
+# Assert on what ctx_render_cursor_hooks actually emits — its two hook event
+# names and the `--flavor cursor` command string — not just "a file exists".
+for marker in '"beforeShellExecution"' '"preToolUse"' \
+    'hook guard-commit --flavor cursor' 'hook guard-edit --flavor cursor'; do
+    if grep -qF "$marker" "$RC/.cursor/hooks.json" 2>/dev/null; then
+        pass "generated .cursor/hooks.json carries $marker"
+    else
+        fail "generated .cursor/hooks.json carries $marker"
     fi
 done
 
@@ -1062,6 +1166,64 @@ assert_eq "rules --check reports drift" "1" "$?"
 (cd "$R" && sh "$Z" adapters --check) >/dev/null 2>&1
 assert_eq "adapters --check reports drift" "1" "$?"
 (cd "$R" && sh "$Z" adapters) >/dev/null 2>&1
+
+# --- hook refresh scoping --------------------------------------------------
+# `zavet hook refresh` backs BOTH SessionStart and PostToolUse(matcher
+# search_replace) on Grok, and Grok's matchers are tool-name only — no path
+# filter — so this command is the only place able to restrict the refresh to
+# .zavet/ edits. Neither generated file's content can change from an edit
+# outside .zavet/, so anything else must no-op silently, and any payload the
+# command cannot read a path from (empty stdin, SessionStart) must still
+# refresh unconditionally, or the mid-session freshness guarantee breaks.
+#
+# mtime comparisons are flaky at second granularity, so these assert on a
+# SENTINEL string surviving (no rewrite happened) or being replaced (a real
+# render-and-mv happened) instead.
+if ! command -v jq >/dev/null 2>&1; then
+    printf 'skip hook refresh scoping (no jq)\n'
+else
+    sentinel() { printf 'SENTINEL\n' >"$R/.grok/rules/zavet.md"; } # $R = the adapters repo above
+    is_sentinel() { grep -qF 'SENTINEL' "$R/.grok/rules/zavet.md" 2>/dev/null; }
+
+    sentinel
+    (cd "$R" && jq -nc '{tool_input:{file_path:"src/foo.ts"}}' | sh "$Z" hook refresh) >/dev/null 2>&1
+    if is_sentinel; then
+        pass "hook refresh no-ops for a payload naming a path outside .zavet/"
+    else
+        fail "hook refresh no-ops for a payload naming a path outside .zavet/"
+    fi
+
+    sentinel
+    (cd "$R" && jq -nc '{tool_input:{file_path:".zavet/decisions/D-0001-guarded.md"}}' | sh "$Z" hook refresh) >/dev/null 2>&1
+    if is_sentinel; then
+        fail "hook refresh regenerates for a payload naming a .zavet/ path"
+    else
+        pass "hook refresh regenerates for a payload naming a .zavet/ path"
+    fi
+
+    # SessionStart's shape: no tool call, so no path to extract — the refresh
+    # must run exactly as it did before this scoping existed.
+    sentinel
+    (cd "$R" && printf '' | sh "$Z" hook refresh) >/dev/null 2>&1
+    if is_sentinel; then
+        fail "hook refresh regenerates on empty stdin (SessionStart)"
+    else
+        pass "hook refresh regenerates on empty stdin (SessionStart)"
+    fi
+
+    # Refreshing twice in a row exercises the cmp -s no-op path in ctx_write —
+    # the second call renders byte-identical content and must skip the mv
+    # without that skip reading as failure.
+    (cd "$R" && printf '' | sh "$Z" hook refresh) >/dev/null 2>&1
+    rc1=$?
+    (cd "$R" && printf '' | sh "$Z" hook refresh) >/dev/null 2>&1
+    rc2=$?
+    assert_eq "hook refresh exits 0 on a fresh render" "0" "$rc1"
+    assert_eq "hook refresh exits 0 when the render is already current (cmp no-op)" "0" "$rc2"
+
+    # Restore real content — later assertions in this suite read this file.
+    (cd "$R" && sh "$Z" adapters) >/dev/null 2>&1
+fi
 
 # --- health reporting -----------------------------------------------------
 # The three cross-harness failures nobody notices on their own: a stale index
@@ -1262,6 +1424,60 @@ assert_eq "--emit=live is the explicit spelling of bare --emit" "guard_blocked" 
 (cd "$R" && sh "$Z" gate --staged --emit=bogus --message 'feat: x') >/dev/null 2>&1
 assert_eq "an unknown --emit source is an error, not a silent bare emit" "1" "$?"
 unset DIRA_EVENT_LOG
+
+# --- direct zavet emit -----------------------------------------------------
+# `zavet emit` only had INDIRECT coverage, through `zavet gate --emit`, which
+# exercises the guard-event kinds but never the command's own contract: the
+# payload shape and the fire-and-forget silence when dira is absent — the
+# state of every CI run and most dev machines.
+DIRA_EVENT_LOG="$TMP/events-emit.log"
+export DIRA_EVENT_LOG
+: >"$DIRA_EVENT_LOG"
+(cd "$R" && PATH="$TMP/fakebin:$PATH" sh "$Z" emit guard_shown D-0001 src/a.rs) >/dev/null 2>&1
+rc=$?
+# Backgrounded pipe to dira, same as the gate-driven emits above.
+sleep 1
+payload=$(cat "$DIRA_EVENT_LOG")
+assert_eq "emit exits 0" "0" "$rc"
+if printf '%s' "$payload" | grep -qF '"v":1'; then
+    pass "emit payload carries the schema version"
+else
+    fail "emit payload carries the schema version"
+    printf '  actual: %s\n' "$payload"
+fi
+if printf '%s' "$payload" | grep -qF '"kind":"guard_shown"'; then
+    pass "emit payload carries the kind"
+else
+    fail "emit payload carries the kind"
+fi
+if printf '%s' "$payload" | grep -qF '"decision_id":"D-0001"'; then
+    pass "emit payload carries the decision id"
+else
+    fail "emit payload carries the decision id"
+fi
+# Not an exact match on $R: `repo_toplevel` resolves through git, which can
+# differ from the test harness's own path by a symlink (e.g. macOS /tmp vs
+# /private/tmp) — the contract is that a cwd is present, not which spelling.
+cwd_val=$(printf '%s' "$payload" | sed -n 's/.*"cwd":"\([^"]*\)".*/\1/p')
+if [ -n "$cwd_val" ]; then
+    pass "emit payload carries a cwd"
+else
+    fail "emit payload carries a cwd"
+    printf '  actual: %s\n' "$payload"
+fi
+unset DIRA_EVENT_LOG
+
+# Fire-and-forget contract: with no dira on PATH, emit must still exit 0 and
+# print nothing — a hook that stalls or fails over a missing daemon is worse
+# than one that silently skips the telemetry. A bare `PATH=""` would also make
+# `sh` itself unresolvable and pass for the wrong reason (the command never
+# ran at all), so this uses a minimal-but-real PATH that has no dira on it —
+# this dev machine has a real `dira` installed, unlike CI, so the absence has
+# to be constructed rather than assumed.
+out=$(cd "$R" && PATH="/usr/bin:/bin" sh "$Z" emit guard_shown D-0001 src/a.rs 2>&1)
+rc=$?
+assert_eq "emit exits 0 with no dira on PATH" "0" "$rc"
+assert_eq "emit is silent with no dira on PATH" "" "$out"
 
 # --- git hook floor -------------------------------------------------------
 (cd "$R" && sh "$Z" adapters) >/dev/null 2>&1
