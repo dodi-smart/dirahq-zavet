@@ -42,6 +42,6 @@ step, or anything that fires on its own.
    about the stack and must not acquire one.
 
 Adding a check is an edit to the record's frontmatter, so it follows the same
-rule as any other record edit: append-only applies to the prose, and
+rule as any other record edit. Records are append-only for meaning, and
 `checks:` is metadata about how the record is verified, not a claim being
 rewritten.

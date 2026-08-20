@@ -25,7 +25,9 @@ Present this repo's recorded knowledge as a readable wiki page. Topic: $ARGUMENT
    - `.zavet/specs/` — living feature specs (follow their `decisions:` links);
    - `.zavet/glossary.md` — project terms;
    - with a topic: grep `.zavet/` and `git log --grep=<topic>` trailers.
-3. Compose a clean summary for the human: standing rules first, then active
+3. Follow the writing-style rule in the zavet skill: plain, active voice, one idea
+   per sentence, no em dashes, no jargon nouns, sentence case.
+   Compose a clean summary for the human: standing rules first, then active
    decisions (one line each: id — title — what it guards), living specs
    (slug — title — origin/confidence, with the decisions they link),
    superseded history, and notable recent trailers. Cite ids everywhere; mark

@@ -32,12 +32,12 @@ checks:
 
 ## Overview
 
-What the feature is and why it exists, in a few sentences.
+What the feature is and why it exists. Three sentences, not ten.
 
 ## Behavior
 
-What it does, as observable behavior. For `reverse-engineered` specs every
-claim here must be traceable to a file actually read — never invented.
+What it does, as observable behavior. For reverse-engineered specs, trace
+every claim to a file you actually read. Never invent one.
 
 ## Interfaces & data
 
@@ -45,7 +45,7 @@ Entry points, commands, schemas, wire formats, storage.
 
 ## Invariants
 
-What must stay true. Reference the decisions behind them by id — the ids
+What must stay true. Reference the decisions behind them by id. The ids
 auto-link.
 
 ## Open Questions
