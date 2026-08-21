@@ -33,7 +33,9 @@ than none.** You are reconstructing hypotheses, not recording facts.
    "this looks intentional because X — worth a record?". Let them cull,
    confirm, or correct. Anything the user confirms from memory may be
    upgraded to `verified: true`; everything else stays a hypothesis.
-3. For each survivor, get an id (`sh ".zavet/bin/zavet" next-id`)
+3. Follow the writing-style rule in the zavet skill: plain, active voice, one idea
+   per sentence, no em dashes, no jargon nouns, sentence case.
+   For each survivor, get an id (`sh ".zavet/bin/zavet" next-id`)
    and write `.zavet/decisions/<id>-<slug>.md` from
    `.zavet/.template.md`, with the backfill deltas:
    - `origin: reverse-engineered` and `verified: false` (unless the user

@@ -24,6 +24,25 @@ Record something only if a future reader **could not reconstruct it from the
 code and diff alone**. Obvious mechanics never get recorded — trailer spam
 devalues the record.
 
+## Writing style
+
+Everything recorded here is read cold, months later, by someone deciding
+whether to change the code. Write for that reader.
+
+- Plain and direct. Write like you are telling a colleague what happened.
+- One idea per sentence. Split anything that makes the reader backtrack.
+- Active voice. Name the actor: the loader parses the file, not the file is parsed.
+- No em dashes. A period or a comma does the same job.
+- Sentence case headings.
+- No inline-header bullets. Write the sentence.
+- Cut words that sound technical and say nothing: surface, harness, substrate,
+  vector, primitive, pivotal, delve, underscore, crucial, leverage, foster, showcase.
+- Skip "not just X, but Y". State the point once.
+- Plain word over fancy. Use, not leverage. Help, not facilitate.
+- A title names the decision (cache invalidation waits for the write), never a
+  moral about it.
+- Keep Why to the constraint itself. Cut the scene-setting.
+
 ## Two capture granularities
 
 **Micro-decisions → commit trailers.** Append to the commit message footer:
@@ -127,10 +146,14 @@ unmarked, and the next reader hits it first.
 
 ## Honesty rules
 
-- Decision records are **append-only**. The only permitted mutations of an
-  existing record are `status: active → superseded` + `superseded-by: <NEW-ID>`,
-  and adding `corrected-by: <NEW-ID>`. Both are frontmatter-only; the body of a
-  recorded decision is never rewritten.
+- Decision records are **append-only for meaning**. The only permitted
+  frontmatter mutations are `status: active → superseded` +
+  `superseded-by: <NEW-ID>`, and adding `corrected-by: <NEW-ID>`. A body may get
+  a prose-only pass that changes no claim: a title, a typo, a broken link, or
+  wording that breaks the writing-style rule above. Say "reword only, no meaning
+  change" in the commit so the diff is trusted without a re-read. Never use that
+  path to soften, hedge, or add a claim. That is a correction (`corrected-by:`)
+  or a new decision.
 - Anything reconstructed from existing code is `origin: reverse-engineered`,
   `verified: false`, with an Open Questions section. A wrong recorded "why" is
   worse than none — never invent rationale.

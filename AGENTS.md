@@ -87,9 +87,14 @@ with `dirahq-cli`; changing it needs a coordinated release, not a same-day fix.
 Never wire it into a hook, and never run a `checks:` command because a record
 mentions one. See [SECURITY.md](SECURITY.md).
 
-**Decision records are append-only.** The only permitted edits to an existing
-record are `status: active → superseded` plus `superseded-by:`, and adding
-`corrected-by:`. Never rewrite a recorded body. This applies to the fixtures too.
+**Decision records are append-only for meaning.** The only permitted frontmatter
+edits are `status: active → superseded` plus `superseded-by:`, and adding
+`corrected-by:`. A body may get a prose-only pass that changes no claim: fixing a
+title, a typo, a broken link, or wording that breaks the house writing style,
+while every section still asserts exactly what it asserted before. Say "reword
+only, no meaning change" in the commit so the diff is trusted without a re-read.
+Never use that path to soften, hedge, or add a claim. That is a correction
+(`corrected-by:`) or a new decision. This applies to the fixtures too.
 
 ## The vendored fixture corpus
 

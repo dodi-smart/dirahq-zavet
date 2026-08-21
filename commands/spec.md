@@ -37,6 +37,23 @@ session into specs.
   code the spec describes.
 
 All flows:
+- Write it plain.
+
+  - Plain and direct. Write like you are telling a colleague what happened.
+  - One idea per sentence. Split anything that makes the reader backtrack.
+  - Active voice. Name the actor: the loader parses the file, not the file
+    is parsed.
+  - No em dashes. A period or a comma does the same job.
+  - Sentence case headings.
+  - No inline-header bullets. Write the sentence.
+  - Cut words that sound technical and say nothing: surface, harness,
+    substrate, vector, primitive, pivotal, delve, underscore, crucial,
+    leverage, foster, showcase.
+  - Skip "not just X, but Y". State the point once.
+  - Plain word over fancy. Use, not leverage. Help, not facilitate.
+  - A title names the decision (cache invalidation waits for the write),
+    never a moral about it.
+  - Keep Why to the constraint itself. Cut the scene-setting.
 - Frontmatter exactly per the template: `title`, `version`, `origin`,
   `verified`, `confidence`, `date` (today), `paths` (git pathspecs, as narrow
   as honest), optional `decisions:` list.

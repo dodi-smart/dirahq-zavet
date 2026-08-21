@@ -26,7 +26,7 @@ flips, no verification. It surfaces what a human should look at.
    `sh ".zavet/bin/zavet" audit` — type-tagged TSV rows:
    `stale-spec slug n since-sha`, `stale-decision id n since-sha`,
    `guard-pressure id glob matched total`, `uncovered-invariant id file`,
-   `long-record id lines`.
+   `long-record id lines`, `style-flag id-or-slug metric count`.
 3. **Conflicts** (unless focused elsewhere): for each `stale-decision`,
    worst drift first, open the record
    (`sh ".zavet/bin/zavet" decision-path <id>`), read its
@@ -58,9 +58,15 @@ flips, no verification. It surfaces what a human should look at.
    guard hook pays for every line of it on each guarded edit. Suggested
    action: move the narrative into a living spec (`zavet-spec`) and leave
    the decision as the decision.
-8. Compose the report in that order — Conflicts, Stale specs, Guard
-   pressure, Unverified invariants, Over-long records — each with concrete
-   next steps (`zavet-decide` to supersede or correct, `zavet-spec` to
+8. **Style flags**: `style-flag` rows are mechanical signals, not a prose review.
+   Report the count per record and name the worst few. A record with several is
+   worth a reword pass, which is allowed: fixing wording is not rewriting the
+   decision. A single hit inside a quoted error message is not a problem.
+9. Follow the writing-style rule in the zavet skill: plain, active voice, one idea
+   per sentence, no em dashes, no jargon nouns, sentence case.
+   Compose the report in that order. Conflicts, Stale specs, Guard pressure,
+   Unverified invariants, Over-long records, Style flags. Give each one
+   concrete next steps (`zavet-decide` to supersede or correct, `zavet-spec` to
    refresh, `zavet-verify` to check, glob narrowing). End with the one-line
    health summary: N decisions (M stale, U unchecked), K specs (J stale),
    widest guard.

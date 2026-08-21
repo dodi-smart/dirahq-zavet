@@ -25,7 +25,7 @@ verified: true
 
 ## Decision
 
-One or two sentences: what was decided.
+One or two sentences. State what was decided as a fact.
 
 ## Why
 
@@ -33,15 +33,15 @@ The constraint or reasoning a future reader could not reconstruct from the code.
 
 ## Rejected
 
-- Alternative — why it lost.
+- Alternative. Why it lost, in one clause.
 
 ## Agent directives
 
-- Concrete do/don't for anyone (human or agent) editing the guarded paths.
+- One imperative sentence per rule. Do this. Don't do that.
 
 ## Verification
 
-How the directives above are enforced — name the `checks:` entries, or state
+How the directives above are enforced. Name the `checks:` entries, or state
 plainly that this one is not mechanically checkable and what a human has to
 look at instead. An unchecked invariant is fine; an unchecked invariant that
 reads as if it were enforced is not.

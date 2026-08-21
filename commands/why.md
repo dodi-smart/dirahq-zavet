@@ -18,7 +18,9 @@ Answer from recorded knowledge: $ARGUMENTS
    shaped them) — open at most 3 documents, and check
    `git log --grep=<term>` trailers (`Why:`, `Constraint:`, `Refs:`, `Spec:`)
    for micro-decisions that never got a record.
-3. Answer with explicit citations (decision ids, spec slugs, commit shas).
+3. Follow the writing-style rule in the zavet skill: plain, active voice, one idea
+   per sentence, no em dashes, no jargon nouns, sentence case.
+   Answer with explicit citations (decision ids, spec slugs, commit shas).
    Distinguish recorded fact (`verified: true`) from unverified content
    (`verified: false`, any origin) — cite the latter only as hypothesis.
 4. If nothing recorded answers the question, say so plainly and offer to

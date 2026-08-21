@@ -1838,6 +1838,59 @@ cmd_audit() {
         printf 'long-record\t%s\t%s\n' "$(id_from_file "${f##*/}")" "$n"
     done
 
+    # --- style flags: em dashes, jargon words, inline "- **Header**:" lists,
+    # and jargon leaking into a title line. Not sentence density or reading
+    # level — neither is mechanically checkable in POSIX sh, so this stops at
+    # saying so instead of faking a check. These four stay: they are cheap,
+    # deterministic grep, and they are the patterns that actually recurred —
+    # hundreds of times each — across the consumer repos' prose.
+    #
+    # glossary.md's ` — ' between term and definition is a structural field
+    # separator the template prescribes, not prose punctuation, and would
+    # skew the em-dash count. It needs no exclusion here: each_decision and
+    # each_spec only glob decisions/*.md and specs/*.md, and glossary.md
+    # lives directly under $ZAVET_DIR, so neither helper ever reaches it.
+    _jargon_re='crucial|delve|underscore(s|d|ing)?|pivotal|showcase[ds]?|leverage[ds]?|foster(s|ed|ing)?|garner(s|ed)?|substrate|harness(es)?|tapestry|testament|intricate|vibrant|nestled|seamless|holistic|synerg(y|ies)'
+    each_decision "$root" | while IFS= read -r f; do
+        key=$(id_from_file "${f##*/}")
+
+        n=$(grep -o '—' "$f" 2>/dev/null | wc -l)
+        n=$((n + 0))
+        [ "$n" -gt 0 ] && printf 'style-flag\t%s\tem-dash\t%s\n' "$key" "$n"
+
+        n=$(grep -ciE "$_jargon_re" "$f" 2>/dev/null)
+        n=$((n + 0))
+        [ "$n" -gt 0 ] && printf 'style-flag\t%s\tbanned-word\t%s\n' "$key" "$n"
+
+        n=$(grep -cE '^- \*\*[^*]+\*\*:' "$f" 2>/dev/null)
+        n=$((n + 0))
+        [ "$n" -gt 0 ] && printf 'style-flag\t%s\tinline-header-list\t%s\n' "$key" "$n"
+
+        n=$(grep '^title:' "$f" 2>/dev/null | head -1 | grep -ciE "$_jargon_re")
+        n=$((n + 0))
+        [ "$n" -gt 0 ] && printf 'style-flag\t%s\ttitle-jargon\t%s\n' "$key" "$n"
+    done
+    each_spec "$root" | while IFS= read -r f; do
+        key=${f##*/}
+        key=${key%.md}
+
+        n=$(grep -o '—' "$f" 2>/dev/null | wc -l)
+        n=$((n + 0))
+        [ "$n" -gt 0 ] && printf 'style-flag\t%s\tem-dash\t%s\n' "$key" "$n"
+
+        n=$(grep -ciE "$_jargon_re" "$f" 2>/dev/null)
+        n=$((n + 0))
+        [ "$n" -gt 0 ] && printf 'style-flag\t%s\tbanned-word\t%s\n' "$key" "$n"
+
+        n=$(grep -cE '^- \*\*[^*]+\*\*:' "$f" 2>/dev/null)
+        n=$((n + 0))
+        [ "$n" -gt 0 ] && printf 'style-flag\t%s\tinline-header-list\t%s\n' "$key" "$n"
+
+        n=$(grep '^title:' "$f" 2>/dev/null | head -1 | grep -ciE "$_jargon_re")
+        n=$((n + 0))
+        [ "$n" -gt 0 ] && printf 'style-flag\t%s\ttitle-jargon\t%s\n' "$key" "$n"
+    done
+
     # --- stale specs: commits touching a spec's paths since the spec file
     # itself last changed. Never-committed specs are skipped (fresh).
     for f in "$root/$ZAVET_DIR"/specs/*.md; do

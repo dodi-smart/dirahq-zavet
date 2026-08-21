@@ -45,9 +45,27 @@ Record a decision: $ARGUMENTS
      that cannot fail is worse than no check.
    - Capture bar: only record what a future reader could NOT reconstruct from
      the code. If it's obvious from the diff, use a commit trailer instead.
-3. If this REPLACES an older decision, edit ONLY the old record's frontmatter:
-   `status: superseded` plus `superseded-by: <new-id>`. Never rewrite its body —
-   records are append-only.
+3. Write it plain. A record nobody can read is a record nobody uses.
+
+   - Plain and direct. Write like you are telling a colleague what happened.
+   - One idea per sentence. Split anything that makes the reader backtrack.
+   - Active voice. Name the actor: the loader parses the file, not the file
+     is parsed.
+   - No em dashes. A period or a comma does the same job.
+   - Sentence case headings.
+   - No inline-header bullets. Write the sentence.
+   - Cut words that sound technical and say nothing: surface, harness,
+     substrate, vector, primitive, pivotal, delve, underscore, crucial,
+     leverage, foster, showcase.
+   - Skip "not just X, but Y". State the point once.
+   - Plain word over fancy. Use, not leverage. Help, not facilitate.
+   - A title names the decision (cache invalidation waits for the write),
+     never a moral about it.
+   - Keep Why to the constraint itself. Cut the scene-setting.
+4. If this REPLACES an older decision, edit ONLY the old record's frontmatter:
+   `status: superseded` plus `superseded-by: <new-id>`. Do not restate or soften
+   what the old record claims. A body may still get a prose-only pass that
+   changes no claim, but that is a separate commit, not part of superseding.
 
    If instead it CORRECTS one claim inside a record that otherwise still
    stands, do not supersede it: add `corrected-by: <new-id>` to the old
@@ -57,9 +75,9 @@ Record a decision: $ARGUMENTS
    prose inside an unrelated record, leaving the wrong claim standing
    unmarked; `zavet check` fails on a pointer that names a record which does
    not exist.
-4. Regenerate the index: `sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" index`
-5. If a living spec in `.zavet/specs/` covers the area this decision shapes,
+5. Regenerate the index: `sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" index`
+6. If a living spec in `.zavet/specs/` covers the area this decision shapes,
    add the new id to that spec (its `decisions:` list or an inline reference
    in the relevant section) — specs link decisions, never the reverse.
-6. Commit the new record (and index) with trailer `Refs: <id>`; when
+7. Commit the new record (and index) with trailer `Refs: <id>`; when
    superseding, also add `Supersedes: <old-id>`.
