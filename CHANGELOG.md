@@ -1,3 +1,9 @@
+## [1.5.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.4.1...v1.5.0) (2026-08-21)
+
+### ✨ Features
+
+* **plugin:** give every generated artifact a house writing style ([88e7642](https://github.com/dodi-smart/dirahq-zavet/commit/88e7642b8cc7c6166e12be6a57a860893ff82667))
+
 ## [1.4.1](https://github.com/dodi-smart/dirahq-zavet/compare/v1.4.0...v1.4.1) (2026-08-14)
 
 ### 🐛 Bug Fixes
