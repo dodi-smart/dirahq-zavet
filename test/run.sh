@@ -233,11 +233,16 @@ echo l2 >"$R/lib/l.rs" && gc add -A && gc commit -qm "feat: spec drift"
 out=$( (cd "$R" && sh "$Z" audit) )
 # This fixture is scaffolded by hand and never runs `zavet adapters`, so the
 # cross-harness rows are expected here — a repo with no AGENTS.md and no
-# .grok/rules/ genuinely has no decision index for anything but Claude Code,
+# AGENTS.md genuinely has no decision index for anything but Claude Code,
 # which is exactly what audit exists to say out loud. They are filtered out of
 # the staleness assertion below and asserted separately.
-assert_eq "audit reports a repo with no cross-harness layer" "adapter-missing	.grok/rules/zavet.md
-adapter-missing	AGENTS.md" "$(printf '%s\n' "$out" | grep '^adapter-' | cut -f1-2)"
+# The Grok rules file is opt-in, so a repo with no .grok/ is not "missing" it.
+assert_eq "audit reports a repo with no cross-harness layer" "adapter-missing	AGENTS.md" \
+    "$(printf '%s\n' "$out" | grep '^adapter-' | cut -f1-2)"
+mkdir -p "$R/.grok"
+assert_eq "audit reports the Grok rules as missing once .grok/ exists" "adapter-missing	.grok/rules/zavet.md
+adapter-missing	AGENTS.md" "$( (cd "$R" && sh "$Z" audit) | grep '^adapter-' | cut -f1-2)"
+rmdir "$R/.grok"
 assert_eq "audit rows (minus shas)" "stale-spec	cap	1
 stale-decision	D-0001	1
 guard-pressure	D-0001	src/**" "$(printf '%s\n' "$out" | grep -v '^adapter-' | grep -v '^githook-' | cut -f1-3)"
@@ -1036,7 +1041,113 @@ cp "$ROOT/templates/INDEX.md" "$R/.zavet/INDEX.md"
 cp "$ROOT/templates/RULES.md" "$R/.zavet/RULES.md"
 mkdir -p "$R/src"
 
-(cd "$R" && sh "$Z" adapters) >/dev/null 2>&1
+# --- --grok opt-in ---------------------------------------------------------
+# Grok Build support is opt-in like Cursor: a repo nobody uses Grok in should
+# not carry files it must commit to keep `adapters --check` green. `--grok`, or
+# an existing `.grok/`, is the way in; every repo that predates the opt-in has
+# `.grok/`, so none of them changes.
+RG="$TMP/adapters-nogrok"
+new_repo "$RG"
+cp "$ROOT/templates/RULES.md" "$RG/.zavet/RULES.md"
+(cd "$RG" && sh "$Z" adapters) >/dev/null 2>&1
+if [ -e "$RG/.grok" ]; then
+    fail "plain adapters in a fresh repo writes no .grok/"
+else
+    pass "plain adapters in a fresh repo writes no .grok/"
+fi
+for f in AGENTS.md .zavet/githooks/commit-msg .zavet/bin/zavet; do
+    if [ -f "$RG/$f" ]; then
+        pass "plain adapters still writes $f"
+    else
+        fail "plain adapters still writes $f"
+    fi
+done
+(cd "$RG" && sh "$Z" adapters --check) >/dev/null 2>&1
+assert_eq "adapters --check passes without .grok/" "0" "$?"
+assert_eq "audit reports no grok adapter-missing without .grok/" "" \
+    "$( (cd "$RG" && sh "$Z" audit) | grep '^adapter-' | grep -F .grok)"
+(cd "$RG" && sh "$Z" index) >/dev/null 2>&1
+if [ -e "$RG/.grok" ]; then
+    fail "zavet index does not conjure .grok/"
+else
+    pass "zavet index does not conjure .grok/"
+fi
+
+(cd "$RG" && sh "$Z" adapters --grok) >/dev/null 2>&1
+for f in .grok/rules/zavet.md .grok/hooks/zavet.json; do
+    if [ -f "$RG/$f" ]; then
+        pass "adapters --grok writes $f"
+    else
+        fail "adapters --grok writes $f"
+    fi
+done
+# Real generated content, not just files that exist.
+for marker in '### Standing rules' '# Zavet knowledge layer'; do
+    if grep -qF "$marker" "$RG/.grok/rules/zavet.md" 2>/dev/null; then
+        pass "generated .grok/rules/zavet.md carries $marker"
+    else
+        fail "generated .grok/rules/zavet.md carries $marker"
+    fi
+done
+for marker in '"PreToolUse"' 'hook guard-edit --flavor grok' 'hook guard-commit --flavor grok'; do
+    if grep -qF "$marker" "$RG/.grok/hooks/zavet.json" 2>/dev/null; then
+        pass "generated .grok/hooks/zavet.json carries $marker"
+    else
+        fail "generated .grok/hooks/zavet.json carries $marker"
+    fi
+done
+(cd "$RG" && sh "$Z" adapters --check) >/dev/null 2>&1
+assert_eq "adapters --check passes with .grok/" "0" "$?"
+# The flag is only needed once: .grok/ now exists, so plain adapters refreshes it.
+printf 'stale\n' >"$RG/.grok/rules/zavet.md"
+(cd "$RG" && sh "$Z" adapters) >/dev/null 2>&1
+if grep -qF '### Standing rules' "$RG/.grok/rules/zavet.md" 2>/dev/null; then
+    pass "a repo that already has .grok/ keeps getting it refreshed"
+else
+    fail "a repo that already has .grok/ keeps getting it refreshed"
+fi
+rm -f "$RG/.grok/rules/zavet.md"
+assert_eq "and a deleted rules file is drift there" "1" "$( (cd "$RG" && sh "$Z" adapters --check) >/dev/null 2>&1; echo $?)"
+assert_eq "audit names it adapter-missing there" "adapter-missing	.grok/rules/zavet.md" \
+    "$( (cd "$RG" && sh "$Z" audit) | grep '^adapter-missing' | cut -f1-2)"
+
+# `zavet rules` is an explicit request, so it writes the file even with no
+# .grok/ — and from then on the repo has opted in.
+RR="$TMP/adapters-rules-explicit"
+new_repo "$RR"
+cp "$ROOT/templates/RULES.md" "$RR/.zavet/RULES.md"
+(cd "$RR" && sh "$Z" rules) >/dev/null 2>&1
+if [ -f "$RR/.grok/rules/zavet.md" ]; then
+    pass "zavet rules writes .grok/rules/zavet.md even without .grok/"
+else
+    fail "zavet rules writes .grok/rules/zavet.md even without .grok/"
+fi
+
+# zavet init: Grok stays out unless asked for, and --grok asks.
+RI="$TMP/adapters-init"
+new_repo "$RI"
+rm -rf "$RI/.zavet"
+(cd "$RI" && sh "$Z" init --prefix INIT) >/dev/null 2>&1
+if [ -e "$RI/.grok" ]; then
+    fail "zavet init in a fresh repo writes no .grok/"
+else
+    pass "zavet init in a fresh repo writes no .grok/"
+fi
+RI="$TMP/adapters-init-grok"
+new_repo "$RI"
+rm -rf "$RI/.zavet"
+out=$(cd "$RI" && sh "$Z" init --prefix INIT --grok 2>&1)
+if [ -f "$RI/.grok/rules/zavet.md" ] && [ -f "$RI/.grok/hooks/zavet.json" ]; then
+    pass "zavet init --grok writes .grok/"
+else
+    fail "zavet init --grok writes .grok/"
+fi
+case $out in
+    *'adapters written (AGENTS.md, .grok/rules/zavet.md'*) pass "init summary names the Grok rules only when written" ;;
+    *) fail "init summary names the Grok rules only when written"; printf '  actual: %s\n' "$out" ;;
+esac
+
+(cd "$R" && sh "$Z" adapters --grok) >/dev/null 2>&1
 
 for f in AGENTS.md .grok/rules/zavet.md .grok/hooks/zavet.json \
     .zavet/githooks/commit-msg .zavet/githooks/pre-commit .zavet/bin/zavet; do
@@ -1090,7 +1201,7 @@ done
 R="$TMP/adapters-perm"
 new_repo "$R"
 cp "$ROOT/templates/RULES.md" "$R/.zavet/RULES.md"
-(umask 077 && cd "$R" && sh "$Z" adapters) >/dev/null 2>&1
+(umask 077 && cd "$R" && sh "$Z" adapters --grok) >/dev/null 2>&1
 for f in .zavet/githooks/commit-msg .zavet/githooks/pre-commit .zavet/bin/zavet; do
     if [ -x "$R/$f" ]; then
         pass "adapters makes $f executable under a strict umask"
@@ -1240,7 +1351,7 @@ echo x >"$R/src/a.rs"
 gc add -A >/dev/null 2>&1
 gc commit -qm "chore: scaffold" >/dev/null 2>&1
 
-(cd "$R" && sh "$Z" adapters) >/dev/null 2>&1
+(cd "$R" && sh "$Z" adapters --grok) >/dev/null 2>&1
 out=$( (cd "$R" && sh "$Z" audit) )
 assert_eq "audit reports an inactive git-hook floor" \
     "githook-floor	inactive" "$(printf '%s\n' "$out" | grep '^githook-floor' | cut -f1-2)"
@@ -1538,8 +1649,24 @@ else
     pass "adapters without hk.pkl does NOT write .zavet/hk/Zavet.pkl"
 fi
 
+# Without hk the closing hint is the usual one.
+out=$(cd "$RH" && sh "$Z" adapters 2>&1)
+case $out in
+    *'next step — "zavet hooks install"'*) pass "non-hk adapters hint is unchanged" ;;
+    *) fail "non-hk adapters hint is unchanged"; printf '  actual: %s\n' "$out" ;;
+esac
+
 printf 'amends "package://example.invalid/hk#/Config.pkl"\n' >"$RH/hk.pkl"
-(cd "$RH" && sh "$Z" adapters) >/dev/null 2>&1
+# hk.pkl not wired: the hint is the import lines, not `zavet hooks install`.
+out=$(cd "$RH" && sh "$Z" adapters 2>&1)
+case $out in
+    *'import "./.zavet/hk/Zavet.pkl"'*'Zavet.guard'*) pass "hk hint names the import when hk.pkl is not wired" ;;
+    *) fail "hk hint names the import when hk.pkl is not wired"; printf '  actual: %s\n' "$out" ;;
+esac
+case $out in
+    *'zavet hooks install'*) fail "hk hint does not say zavet hooks install" ;;
+    *) pass "hk hint does not say zavet hooks install" ;;
+esac
 if [ -f "$RH/.zavet/hk/Zavet.pkl" ]; then
     pass "adapters writes .zavet/hk/Zavet.pkl when the repo has hk.pkl"
 else
@@ -1582,6 +1709,16 @@ hooks {
 EOF
 (cd "$RH" && sh "$Z" hooks --check) >/dev/null 2>&1
 assert_eq "hooks --check fails while hk's hook is not installed" "1" "$?"
+# Wired but not installed: the hint is `hk install`, and no longer the import.
+out=$(cd "$RH" && sh "$Z" adapters 2>&1)
+case $out in
+    *'run "hk install"'*) pass "hk hint names hk install when wired but not installed" ;;
+    *) fail "hk hint names hk install when wired but not installed"; printf '  actual: %s\n' "$out" ;;
+esac
+case $out in
+    *'import "./'*|*'zavet hooks install'*) fail "and says nothing about the import or zavet hooks install" ;;
+    *) pass "and says nothing about the import or zavet hooks install" ;;
+esac
 
 # hk's config hook (Git 2.54+) counts as installed.
 # shellcheck disable=SC2016 # hk's literal hook command; it must not expand here
@@ -1600,6 +1737,11 @@ mkdir -p "$(dirname -- "$shim")"
 printf '#!/bin/sh\ntest "${HK:-1}" = "0" || exec hk run commit-msg --from-hook "$@"\n' >"$shim"
 (cd "$RH" && sh "$Z" hooks --check) >/dev/null 2>&1
 assert_eq "hooks --check passes via hk's .git/hooks shim" "0" "$?"
+out=$(cd "$RH" && sh "$Z" adapters 2>&1)
+case $out in
+    *'next step'*|*'hk install'*) fail "no hint once the floor is active under hk"; printf '  actual: %s\n' "$out" ;;
+    *) pass "no hint once the floor is active under hk" ;;
+esac
 
 # A core.hooksPath zavet set earlier would hide that shim from git. install
 # hands the hooks back to hk; --check only reports it.

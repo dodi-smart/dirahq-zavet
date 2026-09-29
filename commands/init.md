@@ -27,8 +27,14 @@ Initialize the zavet knowledge layer in this repository.
 
    This also writes the cross-harness layer, so the repo's guards hold for
    teammates who are not on Claude Code: a vendored `.zavet/bin/zavet`, an
-   `AGENTS.md` block, `.grok/rules/` + `.grok/hooks/`, and `.zavet/githooks/`.
-   All of it is generated and belongs in the commit — that is the point.
+   `AGENTS.md` block, and `.zavet/githooks/`. All of it is generated and belongs
+   in the commit — that is the point.
+
+   Grok Build files (`.grok/rules/` + `.grok/hooks/`) are opt-in, like Cursor's.
+   They are written when the repo already has a `.grok/`, or when you pass
+   `--grok` (`init --prefix <PREFIX> --grok`). Ask the user whether their team
+   uses Grok Build; if it does, pass `--grok`, otherwise leave it out. It can
+   be added later with `zavet adapters --grok`.
 3. Activate the git-hook floor: `.zavet/bin/zavet hooks install`. It sets
    `core.hooksPath` and is what enforces the guard wall for anyone whose harness
    has no hook API of its own.
@@ -39,7 +45,8 @@ Initialize the zavet knowledge layer in this repository.
    `commit-msg` hook.
 
    If the repo has an `hk.pkl`, hk owns its hooks and `hooks install` leaves
-   `core.hooksPath` alone. Instead it checks that `hk.pkl` imports the generated
+   `core.hooksPath` alone (the closing hint of `zavet adapters` names the missing
+   piece, so relay that instead of `hooks install`). Instead it checks that `hk.pkl` imports the generated
    `.zavet/hk/Zavet.pkl` and that hk's hooks are installed, and prints the lines
    to add when they are missing. Add them to `hk.pkl` (zavet never edits it),
    run `hk install`, then `.zavet/bin/zavet hooks --check`.
@@ -47,7 +54,8 @@ Initialize the zavet knowledge layer in this repository.
    standing rules for this codebase. Derive them from CLAUDE.md / AGENTS.md, CI
    config, and anything the maintainers repeatedly correct. Keep each rule to
    one line. `.zavet/RULES.md` is the source — the generated `AGENTS.md` block
-   and `.grok/rules/zavet.md` pick the change up on the next `zavet index`.
+   and `.grok/rules/zavet.md` (when the repo has one) pick the change up on the
+   next `zavet index`.
 5. Ask the user whether there are existing intentional-but-undocumented
    behaviors worth recording immediately as first decisions; if so, run
    /zavet:decide for each they can state from memory (those are recorded
@@ -56,8 +64,9 @@ Initialize the zavet knowledge layer in this repository.
    offer `/zavet:spec backfill <feature>` (living specs) — going forward
    specs stay current transparently as agents work.
 6. Suggest committing everything scaffolded — `.zavet/`, `AGENTS.md` and
-   `.grok/` — with message `docs: initialize zavet knowledge layer`. The
-   generated files outside `.zavet/` are not incidental: an uncommitted
+   `.grok/` if one was written — with message
+   `docs: initialize zavet knowledge layer`. The generated files outside
+   `.zavet/` are not incidental: an uncommitted
    `.grok/rules/zavet.md` means a teammate on Grok Build has no decision index,
    and an uncommitted `.zavet/bin/zavet` means nothing off Claude Code can run at
    all. If the repo's `.gitignore` covers any of them, say so — `zavet adapters`
