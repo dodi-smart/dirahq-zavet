@@ -1,3 +1,9 @@
+## [1.6.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.5.0...v1.6.0) (2026-09-29)
+
+### ✨ Features
+
+* **plugin:** run the git-hook floor as hk steps when hk owns the hooks ([a942039](https://github.com/dodi-smart/dirahq-zavet/commit/a9420398512fe93b1e13875ba7a9df51e12ead6c)), closes [#17](https://github.com/dodi-smart/dirahq-zavet/issues/17)
+
 ## [1.5.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.4.1...v1.5.0) (2026-08-21)
 
 ### ✨ Features
