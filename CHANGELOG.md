@@ -1,3 +1,9 @@
+## [1.7.1](https://github.com/dodi-smart/dirahq-zavet/compare/v1.7.0...v1.7.1) (2026-09-29)
+
+### 🐛 Bug Fixes
+
+* **plugin:** write an empty prefix-aliases without a trailing space ([5ac8758](https://github.com/dodi-smart/dirahq-zavet/commit/5ac875840d3c5ebcaddd96b93ccfe7468970bc38)), closes [#21](https://github.com/dodi-smart/dirahq-zavet/issues/21)
+
 ## [1.7.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.6.0...v1.7.0) (2026-09-29)
 
 ### ✨ Features
