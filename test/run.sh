@@ -600,6 +600,14 @@ derive_in() { # $1 = org dir (may be empty), $2 = repo name, $3 = remote owner
     (cd "$_d" && sh "$Z" init) >/dev/null 2>&1
     (cd "$_d" && sh "$Z" prefix)
 }
+# A freshly written config carries no trailing whitespace. With no aliases the
+# `prefix-aliases:` line used to end in a space, which every whitespace linter
+# in the adopting repo then flagged in a file zavet owns.
+derive_in dodi-smart dirahq-cloud dodi-smart >/dev/null
+assert_eq "init writes a config with no trailing whitespace" "0" \
+    "$(grep -c '[[:space:]]$' "$TMP/derive/dodi-smart/dirahq-cloud/.zavet/config")"
+assert_eq "an empty prefix-aliases still reads as empty" "" \
+    "$(awk -F: '/^prefix-aliases:/ { print $2 }' "$TMP/derive/dodi-smart/dirahq-cloud/.zavet/config")"
 assert_eq "cloud means backend, behind the product" "DIRABE" \
     "$(derive_in dodi-smart dirahq-cloud dodi-smart)"
 assert_eq "cli means shell, behind the product" "DIRASH" \
