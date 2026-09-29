@@ -133,9 +133,12 @@ You lose the live hooks; you keep the workflows.
 ```
 
 Scaffolds `.zavet/` **and** the cross-harness layer: a vendored
-`.zavet/bin/zavet`, an `AGENTS.md` block, `.grok/rules/` + `.grok/hooks/`, and
-`.zavet/githooks/`. Commit all of it — that is what makes the repo's guards
-hold for teammates on other harnesses. Then activate the git-hook floor:
+`.zavet/bin/zavet`, an `AGENTS.md` block, and `.zavet/githooks/`. Commit all of
+it — that is what makes the repo's guards hold for teammates on other
+harnesses. Grok Build files (`.grok/rules/` + `.grok/hooks/`) are opt-in: add
+them with `zavet init --grok`, or later with `zavet adapters --grok`. A repo
+that already has a `.grok/` gets them refreshed without the flag. Then
+activate the git-hook floor:
 
 ```sh
 .zavet/bin/zavet hooks install
@@ -155,7 +158,9 @@ hooks {
 ```
 
 Then `hk install` and `.zavet/bin/zavet hooks --check`, which reports
-`git-hook floor active (via hk)`. The steps call the same generated
+`git-hook floor active (via hk)`. The closing hint of `zavet adapters` names
+whichever of the two is missing (the import lines, or `hk install`) instead of
+`zavet hooks install`, which is the hint only in repos without an `hk.pkl`. The steps call the same generated
 `.zavet/githooks/` scripts, so the guard blocks and the nudge only warns, exactly
 as without hk.
 
@@ -172,7 +177,7 @@ documentation and, for Grok Build, its source — not what ought to work.
 |---|---|---|---|---|
 | Workflows as slash commands | plugin `commands/` | `.agents/skills/` | `.agents/skills/` | `.agents/skills/` |
 | Ambient knowledge skill | plugin `skills/` | `.agents/skills/` | `.agents/skills/` | `.agents/skills/` |
-| Knowledge index in context | **live** — SessionStart hook | **live** — `.grok/rules/zavet.md` | `AGENTS.md` | `AGENTS.md` |
+| Knowledge index in context | **live** — SessionStart hook | **live** — `.grok/rules/zavet.md`⁴ | `AGENTS.md` | `AGENTS.md` |
 | Index refreshed mid-session | next session | **yes** | no | no |
 | Teach-before-change on edit | **yes** | **yes** | unverified¹ | no — check by hand² |
 | Commit guard wall | **yes**, live | **yes**, live | **yes**, live | git `commit-msg` |
@@ -206,6 +211,15 @@ also catches commits made outside the agent loop — records both surfaces
 without one commit being counted as two. See
 [Guard event schema](#guard-event-schema-v1).
 
+⁴ Grok Build support is opt-in, the way Cursor's is. `zavet init --grok` or
+`zavet adapters --grok` writes `.grok/rules/zavet.md` and
+`.grok/hooks/zavet.json`; a repo that already has a `.grok/` gets them refreshed
+on every `zavet adapters` without the flag, and `zavet index` only ever
+refreshes files that exist. Running `zavet rules` by hand always writes the
+rules file, since that is an explicit request, and the repo then counts as
+opted in. Without `.grok/`, `zavet audit` reports no Grok `adapter-missing` and
+`zavet adapters --check` does not look for those files.
+
 **The wall is one implementation.** Every surface above calls `zavet gate`, and
 `zavet check` shares its trailer patterns. A repo cannot enforce one rule in the
 agent loop and a different one at `git commit`, or teach a rule locally that CI
@@ -231,7 +245,7 @@ renumber [--base <ref>] [--force] <old> <new> · next-id · list · guards ·
 checks · errata · match <path> · match-batch · decision-path <id> ·
 section <id> <heading> · specs · spec-paths · spec-checks · spec-match ·
 check <range> · gate · verify · audit · index · context · rules [--check] ·
-agents-md [--check] · adapters [--check] [--cursor] · hooks [install|--check] ·
+agents-md [--check] · adapters [--check] [--cursor] [--grok] [--hk] · hooks [install|--check] ·
 hook <kind> · deny [--format claude|grok|cursor] <reason> ·
 emit <kind> <id> [file] · version [--json]`.
 
@@ -239,7 +253,7 @@ The cross-harness subcommands, in the order you would meet them:
 
 | Command | Purpose |
 |---|---|
-| `zavet adapters [--check] [--cursor] [--hk]` | Write (or drift-check) everything a repo needs off Claude Code: the vendored CLI, the `AGENTS.md` block, `.grok/rules/` + `.grok/hooks/`, the git-hook templates, optionally `.cursor/hooks.json`, and `.zavet/hk/Zavet.pkl` when the repo has an `hk.pkl`. Run by `zavet init`; re-run after upgrading the plugin. |
+| `zavet adapters [--check] [--cursor] [--grok] [--hk]` | Write (or drift-check) everything a repo needs off Claude Code: the vendored CLI, the `AGENTS.md` block, the git-hook templates, `.grok/rules/` + `.grok/hooks/` with `--grok` or when the repo already has a `.grok/`, optionally `.cursor/hooks.json`, and `.zavet/hk/Zavet.pkl` when the repo has an `hk.pkl`. Run by `zavet init`; re-run after upgrading the plugin. |
 | `zavet hooks install` | Point `core.hooksPath` at `.zavet/githooks` to activate the enforcement floor. Refuses to take over a `core.hooksPath` that already belongs to Husky or lefthook, and prints the one line to add instead. In a repo with an `hk.pkl` it never touches `core.hooksPath`: it checks that `hk.pkl` runs the zavet steps and that hk's hooks are installed. |
 | `zavet gate` | The guard wall over a prospective commit — staged paths plus the message it is about to carry. What every hook calls. |
 | `zavet hook <kind>` | Run a guard over a harness event on stdin (`guard-edit`, `guard-commit`, `refresh`). The generated hook configs call this. |
@@ -545,7 +559,7 @@ is silent:
 
 | Row | Means |
 |---|---|
-| `adapter-missing` | No `AGENTS.md` block or `.grok/rules/zavet.md`. Agents off Claude Code see no decisions at all — which reads as "this repo has none". Run `zavet adapters`. |
+| `adapter-missing` | No `AGENTS.md` block, or no `.grok/rules/zavet.md` in a repo that has a `.grok/`. Agents off Claude Code see no decisions at all — which reads as "this repo has none". Run `zavet adapters`. A repo with no `.grok/` is not reported for Grok: that adapter is opt-in. |
 | `adapter-stale` | The generated index no longer matches the records. Worse than missing: a stale index reads as authoritative, so an agent will confidently cite a decision that was superseded three commits ago. |
 | `adapter-ignored` | The file is gitignored. Grok Build's rules discovery honors `.gitignore` (its *skill* discovery deliberately does not), so the file is invisible on every machine, including the one that wrote it. |
 | `githook-floor` | `core.hooksPath` does not point at `.zavet/githooks`, so the wall is not enforced for anyone whose harness has no hook API. An unenforced floor looks exactly like a compliant repo until someone commits over a guard. |
