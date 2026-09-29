@@ -1,3 +1,9 @@
+## [1.7.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.6.0...v1.7.0) (2026-09-29)
+
+### ✨ Features
+
+* **plugin:** hk-aware adapters hint and opt-in Grok adapter ([b7a15e4](https://github.com/dodi-smart/dirahq-zavet/commit/b7a15e4698f58150252b7e0337ee0ea3b8873647)), closes [#19](https://github.com/dodi-smart/dirahq-zavet/issues/19)
+
 ## [1.6.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.5.0...v1.6.0) (2026-09-29)
 
 ### ✨ Features
