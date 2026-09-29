@@ -1520,6 +1520,119 @@ gc config core.hooksPath .husky
 (cd "$R" && sh "$Z" hooks install) >/dev/null 2>&1
 assert_eq "hooks install refuses a foreign core.hooksPath" "1" "$?"
 assert_eq "and leaves it untouched" ".husky" "$(gc config --get core.hooksPath)"
+gc config --unset core.hooksPath
+
+# --- the floor under hk ---------------------------------------------------
+# A repo with an hk.pkl has handed its hooks to hk, which installs them through
+# git config (Git 2.54+) or .git/hooks. zavet must then leave core.hooksPath
+# alone and run as hk steps instead, from a generated module.
+RH="$TMP/hk"
+new_repo "$RH"
+cp "$ROOT/templates/RULES.md" "$RH/.zavet/RULES.md"
+hc() { git -C "$RH" "$@"; }
+
+(cd "$RH" && sh "$Z" adapters) >/dev/null 2>&1
+if [ -f "$RH/.zavet/hk/Zavet.pkl" ]; then
+    fail "adapters without hk.pkl does NOT write .zavet/hk/Zavet.pkl"
+else
+    pass "adapters without hk.pkl does NOT write .zavet/hk/Zavet.pkl"
+fi
+
+printf 'amends "package://example.invalid/hk#/Config.pkl"\n' >"$RH/hk.pkl"
+(cd "$RH" && sh "$Z" adapters) >/dev/null 2>&1
+if [ -f "$RH/.zavet/hk/Zavet.pkl" ]; then
+    pass "adapters writes .zavet/hk/Zavet.pkl when the repo has hk.pkl"
+else
+    fail "adapters writes .zavet/hk/Zavet.pkl when the repo has hk.pkl"
+fi
+# The steps call the generated githooks, so the wording and the warn-only
+# contract stay in one place.
+for marker in 'guard = new Dynamic' 'nudge = new Dynamic' \
+    '.zavet/githooks/commit-msg {{commit_msg_file}}' '"'.zavet/githooks/pre-commit'"'; do
+    if grep -qF "$marker" "$RH/.zavet/hk/Zavet.pkl" 2>/dev/null; then
+        pass "Zavet.pkl carries $marker"
+    else
+        fail "Zavet.pkl carries $marker"
+    fi
+done
+(cd "$RH" && sh "$Z" adapters --check) >/dev/null 2>&1
+assert_eq "adapters --check passes with the hk module" "0" "$?"
+printf '// tampered\n' >>"$RH/.zavet/hk/Zavet.pkl"
+(cd "$RH" && sh "$Z" adapters --check) >/dev/null 2>&1
+assert_eq "adapters --check reports a stale hk module" "1" "$?"
+(cd "$RH" && sh "$Z" adapters) >/dev/null 2>&1
+
+# Not wired yet: hooks install says what to add and touches no hooksPath.
+out=$(cd "$RH" && sh "$Z" hooks install 2>&1)
+rc=$?
+assert_eq "hooks install under hk fails until hk.pkl is wired" "1" "$rc"
+assert_eq "and never sets core.hooksPath" "" "$(hc config --get core.hooksPath)"
+case $out in
+    *'import "./.zavet/hk/Zavet.pkl"'*) pass "and prints the import to add" ;;
+    *) fail "and prints the import to add"; printf '  actual: %s\n' "$out" ;;
+esac
+
+# Wired, but hk's hook is not installed.
+cat >>"$RH/hk.pkl" <<'EOF'
+import "./.zavet/hk/Zavet.pkl"
+hooks {
+  ["commit-msg"] { steps { ["zavet-guard"] = Zavet.guard } }
+  ["pre-commit"] { steps { ["zavet-nudge"] = Zavet.nudge } }
+}
+EOF
+(cd "$RH" && sh "$Z" hooks --check) >/dev/null 2>&1
+assert_eq "hooks --check fails while hk's hook is not installed" "1" "$?"
+
+# hk's config hook (Git 2.54+) counts as installed.
+# shellcheck disable=SC2016 # hk's literal hook command; it must not expand here
+hc config hook.hk-commit-msg.command 'test "${HK:-1}" = "0" || hk run commit-msg --from-hook'
+hc config hook.hk-commit-msg.event commit-msg
+out=$(cd "$RH" && sh "$Z" hooks --check 2>&1)
+assert_eq "hooks --check passes via hk's config hook" "0:zavet: git-hook floor active (via hk)" "$?:$out"
+hc config --unset hook.hk-commit-msg.command
+hc config --unset hook.hk-commit-msg.event
+
+# So does hk's legacy shim in .git/hooks.
+shim=$(hc rev-parse --git-path hooks/commit-msg)
+case $shim in /*) ;; *) shim="$RH/$shim" ;; esac
+mkdir -p "$(dirname -- "$shim")"
+# shellcheck disable=SC2016 # hk's literal shim; it must not expand here
+printf '#!/bin/sh\ntest "${HK:-1}" = "0" || exec hk run commit-msg --from-hook "$@"\n' >"$shim"
+(cd "$RH" && sh "$Z" hooks --check) >/dev/null 2>&1
+assert_eq "hooks --check passes via hk's .git/hooks shim" "0" "$?"
+
+# A core.hooksPath zavet set earlier would hide that shim from git. install
+# hands the hooks back to hk; --check only reports it.
+hc config core.hooksPath .zavet/githooks
+(cd "$RH" && sh "$Z" hooks --check) >/dev/null 2>&1
+assert_eq "hooks --check fails while zavet's hooksPath hides hk" "1" "$?"
+(cd "$RH" && sh "$Z" hooks install) >/dev/null 2>&1
+assert_eq "hooks install under hk succeeds once wired" "0" "$?"
+assert_eq "and unsets zavet's own core.hooksPath" "" "$(hc config --get core.hooksPath)"
+
+# End to end through a real hk, when one is on PATH (CI does not install it).
+if hk --version >/dev/null 2>&1; then
+    rm -f "$shim"
+    printf 'amends "package://github.com/jdx/hk/releases/download/v2.4.0/hk@2.4.0#/Config.pkl"\n' >"$RH/hk.pkl.new"
+    grep -v '^amends' "$RH/hk.pkl" >>"$RH/hk.pkl.new"
+    mv "$RH/hk.pkl.new" "$RH/hk.pkl"
+    printf -- '---\nid: D-0001\ntitle: Guarded\nstatus: active\nguards:\n  - src/**\n---\n' \
+        >"$RH/.zavet/decisions/D-0001-guarded.md"
+    hc add -A >/dev/null 2>&1
+    # `git`, not `hc`: an assignment before a function call can outlive it in sh.
+    HK=0 git -C "$RH" commit -qm "chore: setup" >/dev/null 2>&1
+    (cd "$RH" && hk install --legacy) >/dev/null 2>&1
+    mkdir -p "$RH/src" && echo z >"$RH/src/a.rs"
+    hc add -A >/dev/null 2>&1
+    hc commit -qm "feat: no trailer" >/dev/null 2>&1
+    assert_eq "hk: commit-msg blocks a guarded commit with no trailer" "1" "$?"
+    hc commit -qm "feat: x
+
+Refs: D-0001" >/dev/null 2>&1
+    assert_eq "hk: a trailered commit passes" "0" "$?"
+else
+    printf 'skip hk end-to-end (no hk on PATH)\n'
+fi
 
 # --- generated skills -----------------------------------------------------
 # The plugin repo's own .agents/skills/ must match its sources, and must carry

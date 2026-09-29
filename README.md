@@ -141,6 +141,24 @@ hold for teammates on other harnesses. Then activate the git-hook floor:
 .zavet/bin/zavet hooks install
 ```
 
+If the repo uses [hk](https://hk.jdx.dev) (it has an `hk.pkl`), hk owns the git
+hooks and zavet runs as two hk steps instead of taking `core.hooksPath`.
+`zavet adapters` writes `.zavet/hk/Zavet.pkl`; wire it into `hk.pkl`:
+
+```pkl
+import "./.zavet/hk/Zavet.pkl"
+
+hooks {
+  ["commit-msg"] { steps { ["zavet-guard"] = Zavet.guard } }
+  ["pre-commit"] { steps { ["zavet-nudge"] = Zavet.nudge } }
+}
+```
+
+Then `hk install` and `.zavet/bin/zavet hooks --check`, which reports
+`git-hook floor active (via hk)`. The steps call the same generated
+`.zavet/githooks/` scripts, so the guard blocks and the nudge only warns, exactly
+as without hk.
+
 Requirements: `git`, POSIX `sh`, `awk`. Hooks additionally use `jq` (they
 silently no-op without it). `dira` is optional.
 
@@ -221,8 +239,8 @@ The cross-harness subcommands, in the order you would meet them:
 
 | Command | Purpose |
 |---|---|
-| `zavet adapters [--check] [--cursor]` | Write (or drift-check) everything a repo needs off Claude Code: the vendored CLI, the `AGENTS.md` block, `.grok/rules/` + `.grok/hooks/`, the git-hook templates, and optionally `.cursor/hooks.json`. Run by `zavet init`; re-run after upgrading the plugin. |
-| `zavet hooks install` | Point `core.hooksPath` at `.zavet/githooks` to activate the enforcement floor. Refuses to take over a `core.hooksPath` that already belongs to Husky or lefthook, and prints the one line to add instead. |
+| `zavet adapters [--check] [--cursor] [--hk]` | Write (or drift-check) everything a repo needs off Claude Code: the vendored CLI, the `AGENTS.md` block, `.grok/rules/` + `.grok/hooks/`, the git-hook templates, optionally `.cursor/hooks.json`, and `.zavet/hk/Zavet.pkl` when the repo has an `hk.pkl`. Run by `zavet init`; re-run after upgrading the plugin. |
+| `zavet hooks install` | Point `core.hooksPath` at `.zavet/githooks` to activate the enforcement floor. Refuses to take over a `core.hooksPath` that already belongs to Husky or lefthook, and prints the one line to add instead. In a repo with an `hk.pkl` it never touches `core.hooksPath`: it checks that `hk.pkl` runs the zavet steps and that hk's hooks are installed. |
 | `zavet gate` | The guard wall over a prospective commit — staged paths plus the message it is about to carry. What every hook calls. |
 | `zavet hook <kind>` | Run a guard over a harness event on stdin (`guard-edit`, `guard-commit`, `refresh`). The generated hook configs call this. |
 | `zavet rules` / `zavet agents-md` | Regenerate one context file. `zavet index` does both, so you rarely call these directly; `--check` is for CI. |

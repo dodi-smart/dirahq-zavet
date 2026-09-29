@@ -47,6 +47,12 @@ Initialize the zavet knowledge layer in this repository.
    (Husky, lefthook, pre-commit), do not override it — relay the one-line
    delegation the command prints, for the user to add to their existing
    `commit-msg` hook.
+
+   If the repo has an `hk.pkl`, hk owns its hooks and `hooks install` leaves
+   `core.hooksPath` alone. Instead it checks that `hk.pkl` imports the generated
+   `.zavet/hk/Zavet.pkl` and that hk's hooks are installed, and prints the lines
+   to add when they are missing. Add them to `hk.pkl` (zavet never edits it),
+   run `hk install`, then `.zavet/bin/zavet hooks --check`.
 4. Open the scaffolded `.zavet/RULES.md` and replace the example with 3–7 real
    standing rules for this codebase. Derive them from CLAUDE.md / AGENTS.md, CI
    config, and anything the maintainers repeatedly correct. Keep each rule to
