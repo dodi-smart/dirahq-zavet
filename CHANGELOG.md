@@ -1,3 +1,9 @@
+## [1.8.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.7.1...v1.8.0) (2026-10-12)
+
+### ✨ Features
+
+* **plugin:** spec sources for OpenSpec, Spec Kit, BMAD and superpowers ([fa411be](https://github.com/dodi-smart/dirahq-zavet/commit/fa411be124f57bf44acbce536525839b30fe3e3d))
+
 ## [1.7.1](https://github.com/dodi-smart/dirahq-zavet/compare/v1.7.0...v1.7.1) (2026-09-29)
 
 ### 🐛 Bug Fixes
