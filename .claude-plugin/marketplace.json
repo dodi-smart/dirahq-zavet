@@ -19,6 +19,7 @@
         "./.agents/skills/zavet-wiki",
         "./.agents/skills/zavet-backfill",
         "./.agents/skills/zavet-spec",
+        "./.agents/skills/zavet-spec-adopt",
         "./.agents/skills/zavet-audit",
         "./.agents/skills/zavet-verify"
       ]

@@ -1,6 +1,6 @@
 ---
 description: Maintain living feature specs — document session work (default), design upfront, or backfill from existing code
-argument-hint: [design <feature> | backfill <feature> | blank = document this session's work]
+argument-hint: [design <feature> | backfill <feature> | source <kind>:<id> | blank = document this session's work]
 ---
 
 Maintain the living specs in `.zavet/specs/`. Input: $ARGUMENTS
@@ -35,6 +35,27 @@ session into specs.
   section listing what could not be reconstructed. Never invent behavior.
 - `confidence` self-assessed from coverage: `high` only when you read all the
   code the spec describes.
+
+**source <kind>:<id>**: work with a spec that a framework owns (OpenSpec,
+Spec Kit, BMAD, superpowers), for example `source openspec:add-csv-import`.
+Declared by `spec-source:` lines in `.zavet/config` (see /zavet:spec-adopt).
+- **Never author or edit the body.** The unit's files belong to the framework.
+  Do not create a `.zavet/specs/` stub for it either. Read the row with
+  `sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" specs --json` (find the slug) and open
+  the files it lists.
+- Record what the artifact implies through /zavet:decide: a decision it makes
+  that code alone will not show (`origin: reverse-engineered`,
+  `verified: false`, with open questions, taken from the framework's own
+  design/research notes), with `guards:` over paths that were **actually
+  touched** under the unit. Never guard paths only a plan named.
+- Cite the unit on commits with `Spec: <kind>:<id>`. That trailer is how its
+  `paths` grow.
+- Report drift as facts (`sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" audit`):
+  planned files nothing touched, touched files no task planned, the unit's
+  files edited in the implementing change, `paths: none yet`. Never say a
+  requirement is satisfied or give a compliance figure. Checkboxes are the
+  framework's claim.
+- `verified` stays `false`. Nobody flips it in zavet.
 
 All flows:
 - Write it plain.

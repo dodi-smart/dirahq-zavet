@@ -12,8 +12,8 @@ covers only what an agent gets wrong here.
 
 | Path | What it is |
 |---|---|
-| `bin/zavet` | The whole implementation. POSIX sh, ~2900 lines, no runtime deps beyond `git`/`awk`/`sed` (`jq` is a soft dep of the hooks only). |
-| `commands/*.md` | The eight workflows, as Claude Code slash commands. **Canonical prose.** |
+| `bin/zavet` | The whole implementation. POSIX sh, ~4900 lines, no runtime deps beyond `git`/`awk`/`sed` (`jq` is a soft dep of the hooks only). |
+| `commands/*.md` | The nine workflows, as Claude Code slash commands. **Canonical prose.** |
 | `skills/zavet/SKILL.md` | The ambient knowledge-layer skill. **Canonical prose.** |
 | `.agents/skills/**` | **Generated.** Portable Agent Skills derived from the two rows above. |
 | `hooks/hooks.json`, `hooks/scripts/*.sh` | Claude Code plugin hook manifest and thin wrappers over `zavet hook`. |
@@ -22,6 +22,13 @@ covers only what an agent gets wrong here.
 | `test/fixtures/dialect/` | The frontmatter-dialect corpus shared with `dirahq-cli`. Vendored — see below. |
 
 ## Rules that are not negotiable
+
+**Spec-framework adapters live once, in `bin/zavet`.** The OpenSpec, Spec Kit,
+BMAD and superpowers parsers, the `spec-source:` config lines and the
+`zavet specs --json` rows are all implemented there and nowhere else. dira
+captures source-backed specs by running that command and never parses those
+frameworks itself, so do not add a second parser in a command, a hook or the
+docs. Source roots are read-only: nothing in this repo writes into one.
 
 **Never hand-edit `.agents/skills/**`.** It is generated. Edit
 `commands/<slug>.md` or `skills/zavet/SKILL.md`, then run:

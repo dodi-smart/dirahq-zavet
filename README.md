@@ -106,7 +106,7 @@ after install** for the plugin's commands and hooks to become active.
 
 ### Every other harness
 
-The same eight workflows are published as [Agent
+The same nine workflows are published as [Agent
 Skills](https://agentskills.io) under `.agents/skills/`, installed with the
 ecosystem's own installer:
 
@@ -235,6 +235,7 @@ then rejects.
 | `/zavet:wiki` | Browse the knowledge base wiki-style — rules, decisions, glossary, recent rationale |
 | `/zavet:backfill` | Reverse-engineer an existing codebase into decision records — proposed to you first, written as `verified: false` hypotheses with open questions, never invented rationale |
 | `/zavet:spec` | Living feature specs. Bare = *document* this session's work (normally happens transparently, no command needed); `design <feature>` = spec before code; `backfill <feature>` = reconstruct from existing code under the honesty rules |
+| `/zavet:spec-adopt` | One-time per repo: detect OpenSpec, Spec Kit, BMAD or superpowers specs, declare them as read-only spec sources, report what resolves and what does not, and record the adoption as a decision. See [Spec sources](#spec-sources) |
 | `/zavet:audit` | Report-only knowledge health sweep — code-vs-decision conflicts, stale specs, over-broad guards, unverified invariants, over-long records. Judges nothing it didn't open; changes nothing |
 | `/zavet:verify` | Run the checks bound to decisions and specs, and report what is recorded but unchecked. The only command that executes repository content — always explicitly, never from a hook |
 
@@ -253,6 +254,8 @@ The cross-harness subcommands, in the order you would meet them:
 
 | Command | Purpose |
 |---|---|
+| `zavet spec-sources [--detect] [--write]` | Find spec frameworks in the repo (`openspec/`, `.specify/` + `specs/`, `_bmad/` plus its output folder, `docs/superpowers/`). `--detect` prints findings and writes nothing; `--write` adds `spec-source:` lines to `.zavet/config`. `zavet init` runs the same detection. |
+| `zavet specs --json [--with-text]` | Every spec as JSON Lines, native and source-backed, one row per unit. No requirement or task text unless `--with-text`. See [Spec sources](#spec-sources). |
 | `zavet adapters [--check] [--cursor] [--grok] [--hk]` | Write (or drift-check) everything a repo needs off Claude Code: the vendored CLI, the `AGENTS.md` block, the git-hook templates, `.grok/rules/` + `.grok/hooks/` with `--grok` or when the repo already has a `.grok/`, optionally `.cursor/hooks.json`, and `.zavet/hk/Zavet.pkl` when the repo has an `hk.pkl`. Run by `zavet init`; re-run after upgrading the plugin. |
 | `zavet hooks install` | Point `core.hooksPath` at `.zavet/githooks` to activate the enforcement floor. Refuses to take over a `core.hooksPath` that already belongs to Husky or lefthook, and prints the one line to add instead. In a repo with an `hk.pkl` it never touches `core.hooksPath`: it checks that `hk.pkl` runs the zavet steps and that hk's hooks are installed. |
 | `zavet gate` | The guard wall over a prospective commit — staged paths plus the message it is about to carry. What every hook calls. |
@@ -439,7 +442,7 @@ release. Folding the two for display is a dira-side choice.
 ## Integration contract (stable)
 
 `dira zavet install` (see [Install](#install)) and every other point of
-contact between this plugin and dira depend on four things staying stable.
+contact between this plugin and dira depend on five things staying stable.
 Changing any of them is a breaking change requiring a coordinated dirahq-cli
 release, not a same-day fix:
 
@@ -458,6 +461,16 @@ release, not a same-day fix:
    `test/run.sh` pins the exact default string.
 4. **Wire format** — the guard-event schema on stdin of `dira zavet emit` is
    `v: 1` (see [Guard event schema](#guard-event-schema-v1) above).
+5. **Spec rows** — `zavet specs --json` emits JSON Lines, one object per spec
+   with `"v":1`, announced by `"specs_json":1` in `zavet version --json`. Row
+   fields: `slug`, `kind` (`zavet` for native specs), `id`, `root`,
+   `frameworkVersion`, `title`, `origin`, `verified`, `state` (normalised) and
+   `nativeState`, `group`, `capabilities`, `risk`, `primary`, `files`
+   (`path` + blob `oid`), `firstCommit`/`firstAt`/`lastCommit`/`lastAt`,
+   `closedOn`, `paths`, `plannedPaths`, `requirements` (id, state, scenarios,
+   capability), `tasks` (id, done, story, parallel, status), `drift` counts,
+   `unresolved`. No requirement, task or document text appears without
+   `--with-text`. A consumer checks `specs_json` before calling the command.
 
 ## Version compatibility
 
@@ -474,6 +487,7 @@ release, not a same-day fix:
 | `version` | The plugin's own version, read from `.claude-plugin/plugin.json`. |
 | `emit_schema` | The guard-event schema version this build of `bin/zavet` emits (currently `1`). |
 | `min_dira` | **Advisory only** — see below. |
+| `specs_json` | Present (value `1`) when this build supports `zavet specs --json`. Absent on older builds, so a consumer treats absence as "not supported" and falls back to parsing `.zavet/specs/` files. |
 
 **Posture: surface skew, never gate on it.** The whole premise of this
 plugin is that each half of the dira + zavet pair works fully without the
@@ -571,6 +585,62 @@ artifact just teaches people to ignore the check.
 **Honesty rule:** knowledge reconstructed from existing code is marked
 `origin: reverse-engineered`, `verified: false`, with open questions instead of
 invented rationale. A wrong recorded "why" is worse than none.
+
+## Spec sources
+
+Teams that already write specs in another framework do not have to copy them
+into `.zavet/specs/`. Run `/zavet:spec-adopt` once and zavet resolves each unit
+live, in place, as a spec you can cite. zavet only reads those files.
+
+| Framework | Unit | Artifacts read | What zavet records |
+|---|---|---|---|
+| OpenSpec | change folder `openspec/changes/<id>/` (the archive date prefix is dropped) | `proposal.md`, `specs/*/spec.md` deltas, `tasks.md`, `design.md` | slug `openspec:<id>`, title, requirement ids and delta state, task checkboxes, archived or active |
+| Spec Kit | feature folder under `specs/` | `spec.md` (`FR-NNN`, `[NEEDS CLARIFICATION]`), `tasks.md`, `research.md` | slug `speckit:<folder>`, requirement ids (open when marked), tasks with planned file paths |
+| BMAD | epic and story files in `_bmad-output` (or its configured folder) | epic and story frontmatter and statuses | slug `bmad:<id>`, epic and story status, risk when declared |
+| superpowers | `docs/superpowers/specs/<date>-<topic>-design.md` | the design doc and, only when its `**Spec:**` header names the design, the matching plan | slug `superpowers:<date>-<topic>`, plan checkboxes and planned files |
+
+A unit that cannot be parsed reports `unresolved` with the reason. It never
+falls back to a guess.
+
+Sources are declared in `.zavet/config`, one flat line each:
+
+```
+spec-source: <kind> <root> [globs...]
+spec-source: openspec openspec
+spec-source: superpowers docs/superpowers
+```
+
+`kind` is `openspec`, `speckit`, `bmad` or `superpowers`. The optional globs
+are human-declared paths for the units under that root.
+
+`Spec:` trailers take a comma-separated list of slugs, each native
+(`capture-pipeline`) or `<kind>:<id>`:
+
+```
+Spec: capture-pipeline, openspec:add-csv-import
+```
+
+**Read-only, and an honesty boundary.**
+
+- zavet never writes into a declared source root. Only the framework's own
+  commands change those files.
+- A source-backed spec is `origin: external` and permanently `verified: false`.
+  zavet did not author its claims and cannot confirm them. It still counts
+  toward coverage once it has paths.
+- Paths are never derived from the artifact. They accrete from `Spec:` trailers
+  on commits, plus any globs a human declared. A unit with none reports
+  `paths: none yet`, which means uncovered, not clean.
+- Planned file paths from tasks are a claim the framework made. They feed drift
+  facts, never coverage.
+- Task checkboxes are the framework's claim and are recorded as that. zavet
+  states no compliance percentage and never says a requirement is satisfied.
+- A Spec Kit `constitution.md` is reported next to `.zavet/RULES.md` and never
+  imported.
+
+`zavet audit` adds four advisory drift rows for these units:
+`source-spec-edited-in-implementing-change`, `planned-not-touched`,
+`touched-not-planned` and `paths-none-yet`. They are facts that re-derive from
+git, not judgements.
 
 ## Spec format
 

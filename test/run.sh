@@ -3,7 +3,7 @@
 #
 #   sh test/run.sh
 #
-# Eleven suites, all through the public `bin/zavet` interface:
+# Twelve suites, all through the public `bin/zavet` interface:
 #   dialect  — fixture corpus vs the golden TSVs (the cross-parser contract
 #              shared with dira-core; see fixtures/dialect/README.md)
 #   matcher  — run_match glob semantics (** collapse, trailing /, dedup)
@@ -21,6 +21,9 @@
 #              per-harness deny envelopes, and the agent-loop-vs-commit wall
 #   harness envelopes — per-harness deny envelope shapes: claude/grok/cursor
 #              detection and formats
+#   sdlc     — spec sources: the four framework adapters over fixtures/sdlc,
+#              `specs --json`, accretion and the per-slug `Spec:` grammar,
+#              config round-trip, and the read-only invariants
 set -u
 
 # shellcheck disable=SC1007
@@ -86,6 +89,7 @@ cp "$FIX/specs/.hidden-template.md" "$R/.zavet/specs/"
 (cd "$R" && sh "$Z" spec-paths) >"$TMP/a.sp" && assert_file "spec-paths" "$FIX/expected/spec-paths.tsv" "$TMP/a.sp"
 (cd "$R" && sh "$Z" checks) >"$TMP/a.dc" && assert_file "decision-checks" "$FIX/expected/decision-checks.tsv" "$TMP/a.dc"
 (cd "$R" && sh "$Z" spec-checks) >"$TMP/a.sc" && assert_file "spec-checks" "$FIX/expected/spec-checks.tsv" "$TMP/a.sc"
+(cd "$R" && sh "$Z" spec-sources --list) >"$TMP/a.ss" && assert_file "spec-sources" "$FIX/expected/spec-sources.tsv" "$TMP/a.ss"
 # No golden for errata: id canonicalization is a documented Rust-only extra,
 # so the two sides deliberately disagree here (D-0015 carries `D-7`).
 (cd "$R" && sh "$Z" errata) >"$TMP/a.er"
@@ -311,7 +315,7 @@ cat >"$R/plugin/.claude-plugin/plugin.json" <<'EOF'
   "description": "fixture manifest for the version-contract tests"
 }
 EOF
-json_expected='{"v":1,"plugin":"zavet","version":"9.9.9-test","emit_schema":1,"min_dira":"0.1.0"}'
+json_expected='{"v":1,"plugin":"zavet","version":"9.9.9-test","emit_schema":1,"min_dira":"0.1.0","specs_json":1}'
 
 assert_eq "version: bare, direct invocation" "9.9.9-test" "$(sh "$R/plugin/bin/zavet" version)"
 assert_eq "version: --json, direct invocation" "$json_expected" "$(sh "$R/plugin/bin/zavet" version --json)"
@@ -348,7 +352,7 @@ out=$(sh "$R2/plugin/bin/zavet" version --json)
 rc=$?
 assert_eq "version --json: missing manifest exits 0" "0" "$rc"
 assert_eq "version --json: missing manifest embeds unknown" \
-    '{"v":1,"plugin":"zavet","version":"unknown","emit_schema":1,"min_dira":"0.1.0"}' "$out"
+    '{"v":1,"plugin":"zavet","version":"unknown","emit_schema":1,"min_dira":"0.1.0","specs_json":1}' "$out"
 
 # Byte-for-byte against the REAL shipped manifest, through the real $Z —
 # the actual contract dira-side installers will read.
@@ -1899,6 +1903,755 @@ else
         PATH="" sh "$Z" hook guard-edit 2>/dev/null)
     assert_eq "guard-edit fails open without jq" "" "$out"
 fi
+
+# ------------------------------------------------------------------- sdlc --
+printf -- '-- sdlc\n'
+SDLC="$ROOT/test/fixtures/sdlc"
+
+assert_has() { # $1 label, $2 haystack, $3 needle
+    case "$2" in
+        *"$3"*) pass "$1" ;;
+        *)
+            fail "$1"
+            printf '  missing: [%s]\n  in:      [%s]\n' "$3" "$2"
+            ;;
+    esac
+}
+assert_lacks() { # $1 label, $2 haystack, $3 needle
+    case "$2" in
+        *"$3"*)
+            fail "$1"
+            printf '  unexpected: [%s]\n' "$3"
+            ;;
+        *) pass "$1" ;;
+    esac
+}
+
+# A repo seeded with one fixture, one config line, one commit.
+sdlc_repo() { # $1 dir, $2 fixture, $3.. = config lines
+    _d=$1
+    _f=$2
+    shift 2
+    new_repo "$_d"
+    cp -R "$SDLC/$_f/." "$_d/"
+    printf 'prefix: ZAVET\nprefix-aliases:\nid-width: 5\n' >"$_d/.zavet/config"
+    for _l in "$@"; do printf '%s\n' "$_l" >>"$_d/.zavet/config"; done
+    git -C "$_d" add -A
+    git -C "$_d" commit -qm "chore: seed"
+}
+
+# One JSON row, by slug, out of `zavet specs --json` run in $R.
+sdlc_row() { # $1 slug, rest = extra specs flags
+    _s=$1
+    shift
+    (cd "$R" && sh "$Z" specs --json "$@") | grep -F "\"slug\":\"$_s\""
+}
+
+# --- config: write_config preserves every line it does not own.
+R="$TMP/sdlc-config"
+new_repo "$R"
+cat >"$R/.zavet/config" <<'EOF'
+# hand-written note that must survive
+prefix: ZAVET
+prefix-aliases:
+spec-source: openspec openspec
+spec-source: superpowers docs/superpowers src/**
+future-key: some value
+id-width: 5
+EOF
+(cd "$R" && sh "$Z" prefix ACME) >/dev/null 2>&1
+assert_eq "prefix change keeps spec-source lines, comments and unknown keys" "# hand-written note that must survive
+prefix: ACME
+prefix-aliases: ZAVET
+spec-source: openspec openspec
+spec-source: superpowers docs/superpowers src/**
+future-key: some value
+id-width: 5" "$(cat "$R/.zavet/config")"
+assert_eq "retired prefix is still resolved" "ACME ZAVET" "$( (cd "$R" && sh "$Z" prefixes) )"
+# A config missing an owned key gets it appended, not the file rewritten.
+printf 'prefix: ZAVET\nspec-source: bmad _bmad-output\n' >"$R/.zavet/config"
+(cd "$R" && sh "$Z" prefix ACME) >/dev/null 2>&1
+assert_eq "missing owned keys are appended" "prefix: ACME
+spec-source: bmad _bmad-output
+prefix-aliases: ZAVET
+id-width: 4" "$(cat "$R/.zavet/config")"
+# The empty-aliases case keeps no trailing space (the #22 regression).
+R="$TMP/sdlc-config-empty"
+new_repo "$R"
+rm -rf "$R" && mkdir -p "$R" && git -C "$R" init -q
+(cd "$R" && sh "$Z" init --prefix ZAVET) >/dev/null 2>&1
+if grep -q '^prefix-aliases:$' "$R/.zavet/config"; then
+    pass "empty prefix-aliases has no trailing space"
+else
+    fail "empty prefix-aliases has no trailing space"
+fi
+
+# --- spec_sources: kinds, roots, globs; unknown lines are ignored and reported.
+R="$TMP/sdlc-sources"
+new_repo "$R"
+cat >"$R/.zavet/config" <<'EOF'
+prefix: ZAVET
+spec-source: openspec openspec
+spec-source: openspec ./openspec/
+spec-source: speckit specs src/** docs/**   # trailing comment
+spec-source: kiro .kiro
+spec-source: bmad ../outside
+spec-source: bmad /abs
+spec-source: openspec open*spec
+spec-source: superpowers
+  spec-source: superpowers indented
+EOF
+mkdir -p "$R/openspec/changes" "$R/specs"
+assert_eq "spec-source rows: ok kinds, deduped, globs kept" "openspec	openspec	
+speckit	specs	src/** docs/**" "$(cd "$R" && sh "$Z" spec-sources | awk -F '\t' '$1 == "source" { print $2 "\t" $3 "\t" $6 }')"
+assert_has "unknown kind is reported" "$(cd "$R" && sh "$Z" spec-sources)" "source-unknown-kind	kiro	.kiro"
+assert_has "a root escaping the repo is reported" "$(cd "$R" && sh "$Z" spec-sources)" "source-invalid-root	bmad	../outside"
+assert_has "a glob character in a root is reported" "$(cd "$R" && sh "$Z" spec-sources)" "source-invalid-root	openspec	open*spec"
+assert_has "an absolute root is reported" "$(cd "$R" && sh "$Z" spec-sources)" "source-invalid-root	bmad	/abs"
+assert_has "a line with no root is reported" "$(cd "$R" && sh "$Z" spec-sources)" "source-incomplete	superpowers	-"
+
+# --- native specs ride the same JSON, kind zavet.
+R="$TMP/sdlc-native"
+new_repo "$R"
+cat >"$R/.zavet/specs/billing.md" <<'EOF'
+---
+title: Billing \ core
+origin: designed
+verified: true
+confidence: high
+date: 2026-07-01
+paths: [billing/**]
+---
+body
+EOF
+gc add -A && gc commit -qm "feat: billing spec"
+row=$(sdlc_row billing)
+assert_has "native row has kind zavet" "$row" '"kind":"zavet"'
+assert_has "native title is JSON-escaped" "$row" '"title":"Billing \\ core"'
+assert_has "native verified comes from the frontmatter" "$row" '"verified":true'
+assert_has "native origin is its own" "$row" '"origin":"designed"'
+assert_has "native declared paths" "$row" '"paths":["billing/**"]'
+assert_has "native primary is the spec file" "$row" '"primary":".zavet/specs/billing.md"'
+assert_has "native rows carry no drift claim" "$row" '"drift":null'
+assert_has "native history is filled" "$row" '"firstCommit":"'
+if command -v jq >/dev/null 2>&1; then
+    if (cd "$R" && sh "$Z" specs --json) | jq -e . >/dev/null 2>&1; then
+        pass "specs --json parses as JSON (jq)"
+    else
+        fail "specs --json parses as JSON (jq)"
+    fi
+fi
+
+# --- OpenSpec ----------------------------------------------------------------
+R="$TMP/sdlc-openspec"
+sdlc_repo "$R" openspec 'spec-source: openspec openspec'
+row=$(sdlc_row openspec:add-csv-import)
+assert_has "openspec: slug, kind, id, root" "$row" '"slug":"openspec:add-csv-import","kind":"openspec","id":"add-csv-import","root":"openspec"'
+assert_has "openspec: title from the proposal heading, Change: prefix dropped" "$row" '"title":"Add CSV import"'
+assert_has "openspec: origin external, verified false" "$row" '"origin":"external","verified":false'
+assert_has "openspec: frameworkVersion from config.yaml" "$row" '"frameworkVersion":"0.9.1"'
+assert_has "openspec: a change folder is active" "$row" '"state":"active","nativeState":"changes"'
+assert_has "openspec: capabilities are the delta dirs" "$row" '"capabilities":["csv-import","history"]'
+assert_has "openspec: primary is the proposal" "$row" '"primary":"openspec/changes/add-csv-import/proposal.md"'
+assert_has "openspec: ordinal ids per delta file with scenario counts" "$row" '{"id":"R1","state":"added","scenarios":2,"capability":"csv-import"},{"id":"R2","state":"added","scenarios":1,"capability":"csv-import"},{"id":"R3","state":"modified","scenarios":1,"capability":"csv-import"},{"id":"R4","state":"removed","scenarios":0,"capability":"csv-import"}'
+assert_has "openspec: RENAMED is one renamed requirement, not removal plus addition" "$row" '{"id":"R1","state":"renamed","scenarios":0,"capability":"history"},{"id":"R2","state":"added","scenarios":1,"capability":"history"}'
+assert_has "openspec: tasks.md checkboxes with their numbers" "$row" '{"id":"1.1","done":true,"story":null,"parallel":false,"status":null},{"id":"1.2","done":false,'
+assert_has "openspec: a declared unit starts with no paths" "$row" '"paths":[]'
+assert_has "openspec: every unit file has a blob oid" "$row" '"path":"openspec/changes/add-csv-import/design.md","oid":"'
+# Archive: the date prefix is dropped, the state is archived, the date is closedOn.
+row=$(sdlc_row openspec:fix-date-parse)
+assert_has "openspec: archive folder keeps the bare id" "$row" '"slug":"openspec:fix-date-parse"'
+assert_has "openspec: archived state" "$row" '"state":"archived","nativeState":"archive"'
+assert_has "openspec: closedOn is the archive date" "$row" '"closedOn":"2026-09-30"'
+assert_lacks "openspec: no dated slug leaks out" "$(cd "$R" && sh "$Z" specs --json)" '"slug":"openspec:2026-09-30'
+# A change with no proposal is unresolved, with the reason and no claims.
+row=$(sdlc_row openspec:orphan-change)
+assert_has "openspec: missing proposal is unresolved" "$row" '"state":"unresolved"'
+assert_has "openspec: the reason is stated" "$row" '"unresolved":"proposal.md missing"'
+assert_has "openspec: unresolved rows carry no requirements or tasks" "$row" '"requirements":[],"tasks":[],"drift":null'
+assert_eq "openspec: the canonical specs/ tree is never a unit" "3" "$( (cd "$R" && sh "$Z" specs --json) | wc -l | tr -d ' ')"
+
+# Archive rename identity: the same slug before and after `archive`, with the
+# unit's history spanning both locations.
+R="$TMP/sdlc-archive"
+new_repo "$R"
+printf 'prefix: ZAVET\nspec-source: openspec openspec\n' >"$R/.zavet/config"
+mkdir -p "$R/openspec/changes/add-thing/specs/thing"
+printf '# Change: Add thing\n\n## Why\nbecause\n' >"$R/openspec/changes/add-thing/proposal.md"
+printf '## ADDED Requirements\n\n### Requirement: Thing\nSHALL\n\n#### Scenario: One\n- **WHEN** x\n' >"$R/openspec/changes/add-thing/specs/thing/spec.md"
+gc add -A && gc commit -qm "feat: propose"
+c1=$(gc rev-parse HEAD)
+before=$(sdlc_row openspec:add-thing)
+assert_has "archive identity: active before" "$before" '"state":"active"'
+mkdir -p "$R/openspec/changes/archive"
+gc mv openspec/changes/add-thing openspec/changes/archive/2026-10-01-add-thing
+gc commit -qm "chore: archive add-thing"
+c2=$(gc rev-parse HEAD)
+after=$(sdlc_row openspec:add-thing)
+assert_has "archive identity: same slug, now archived" "$after" '"slug":"openspec:add-thing","kind":"openspec","id":"add-thing"'
+assert_has "archive identity: archived state" "$after" '"state":"archived"'
+assert_has "archive identity: firstCommit is the proposal commit" "$after" "\"firstCommit\":\"$c1\""
+assert_has "archive identity: lastCommit is the archive commit" "$after" "\"lastCommit\":\"$c2\""
+assert_eq "archive identity: exactly one row for the unit" "1" "$( (cd "$R" && sh "$Z" specs --json) | wc -l | tr -d ' ')"
+# JSON escaping of a hostile title.
+printf '# Change: Say "hi" \\ there\n\n## Why\nx\n' >"$R/openspec/changes/archive/2026-10-01-add-thing/proposal.md"
+row=$(sdlc_row openspec:add-thing)
+assert_has "titles are JSON-escaped (quote and backslash)" "$row" '"title":"Say \"hi\" \\ there"'
+
+# --- Spec Kit ----------------------------------------------------------------
+R="$TMP/sdlc-speckit"
+sdlc_repo "$R" speckit 'spec-source: speckit specs'
+row=$(sdlc_row speckit:001-photo-albums)
+assert_has "speckit: slug is the folder name" "$row" '"slug":"speckit:001-photo-albums","kind":"speckit","id":"001-photo-albums"'
+assert_has "speckit: title drops the template label" "$row" '"title":"Photo albums"'
+assert_has "speckit: frameworkVersion from .specify" "$row" '"frameworkVersion":"0.4.2"'
+assert_has "speckit: nativeState is the spec Status line" "$row" '"nativeState":"Draft"'
+assert_has "speckit: group is the feature number" "$row" '"group":{"kind":"feature","id":"001"}'
+assert_has "speckit: some tasks done is in-progress" "$row" '"state":"in-progress"'
+assert_has "speckit: FR lines are requirements, clarification marks one open" "$row" '{"id":"FR-001","state":"declared","scenarios":0,"capability":null},{"id":"FR-002","state":"declared","scenarios":0,"capability":null},{"id":"FR-003","state":"open","scenarios":0,"capability":null}'
+assert_has "speckit: task done, parallel and story markers" "$row" '{"id":"T002","done":true,"story":null,"parallel":true,"status":null},{"id":"T012","done":false,"story":"US1","parallel":true,"status":null},{"id":"T013","done":false,"story":"US1","parallel":false,"status":null},{"id":"T014","done":false,"story":"US2","parallel":true,"status":null}'
+assert_has "speckit: planned paths come from task lines, as a claim" "$row" '"plannedPaths":["src/albums","src/albums/storage.py","src/models/album.py","src/services/album_service.py"]'
+assert_has "speckit: planned paths are never coverage" "$row" '"paths":[]'
+assert_has "speckit: planned-untouched drift is counted" "$row" '"drift":{"plannedUntouched":4,"touchedUnplanned":0,"editedWithImplementation":false}'
+row=$(sdlc_row speckit:20260918-143000-csv-import)
+assert_has "speckit: timestamp-style folders resolve" "$row" '"id":"20260918-143000-csv-import"'
+assert_has "speckit: no tasks.md is proposed" "$row" '"state":"proposed"'
+assert_has "speckit: timestamp group id" "$row" '"group":{"kind":"feature","id":"20260918-143000"}'
+row=$(sdlc_row speckit:002-broken)
+assert_has "speckit: a folder with no spec.md is unresolved with the reason" "$row" '"unresolved":"spec.md missing"'
+assert_lacks "speckit: a non-feature folder is not a unit" "$(cd "$R" && sh "$Z" specs --json)" 'notes'
+assert_lacks "speckit: the constitution is never imported" "$(cd "$R" && sh "$Z" specs --json)" 'constitution'
+assert_has "speckit: the constitution is reported, not imported" "$(cd "$R" && sh "$Z" spec-sources)" "constitution	.specify/memory/constitution.md"
+# All tasks done is done.
+sed 's/\[ \]/[x]/' "$R/specs/001-photo-albums/tasks.md" >"$R/tasks.tmp" && mv "$R/tasks.tmp" "$R/specs/001-photo-albums/tasks.md"
+assert_has "speckit: all tasks done is done" "$(sdlc_row speckit:001-photo-albums)" '"state":"done"'
+
+# --- BMAD v6.12 ticket tree --------------------------------------------------
+R="$TMP/sdlc-bmad"
+sdlc_repo "$R" bmad-612 'spec-source: bmad _bmad-output'
+row=$(sdlc_row bmad:epic-cart)
+assert_has "bmad: the unit is the epic" "$row" '"slug":"bmad:epic-cart","kind":"bmad","id":"epic-cart"'
+assert_has "bmad: title and version" "$row" '"frameworkVersion":"6.12.0","title":"Cart"'
+assert_has "bmad: epic status maps verbatim" "$row" '"state":"in-progress","nativeState":"in-progress"'
+assert_has "bmad: the initiative is the group" "$row" '"group":{"kind":"initiative","id":"initiative-checkout"}'
+assert_has "bmad: risk from the frontmatter" "$row" '"risk":"medium"'
+assert_has "bmad: R and E ids under Requirements" "$row" '{"id":"R1","state":"declared","scenarios":0,"capability":null},{"id":"R2","state":"declared","scenarios":0,"capability":null},{"id":"E1","state":"declared","scenarios":0,"capability":null}'
+assert_has "bmad: tickets with the story plan status" "$row" '{"id":"story-cart-ui-shell","done":true,"story":null,"parallel":false,"status":"done"},{"id":"story-cart-api","done":false,"story":null,"parallel":false,"status":"review"},{"id":"story-cart-empty-state","done":false,"story":null,"parallel":false,"status":null}'
+assert_has "bmad: epic, tickets and story files are the unit" "$row" '"path":"_bmad-output/initiative-checkout/epic-cart/tickets.toml"'
+all=$(cd "$R" && sh "$Z" specs --json)
+assert_lacks "bmad: the assignee is never emitted" "$all" 'jdoe'
+assert_lacks "bmad: the assignee key is never emitted" "$all" 'assignee'
+assert_lacks "bmad: standalone backlog tickets are not units" "$all" 'standalone'
+assert_has "bmad: absent status is proposed" "$(sdlc_row bmad:epic-payments)" '"state":"proposed","nativeState":null'
+assert_has "bmad: high risk" "$(sdlc_row bmad:epic-payments)" '"risk":"high"'
+assert_has "bmad: a dropped epic is archived, the word is kept" "$(sdlc_row bmad:epic-dropped)" '"state":"archived","nativeState":"dropped"'
+assert_has "bmad: an epic with no epic file is unresolved" "$(sdlc_row bmad:epic-nofile)" '"unresolved":"epic file missing"'
+# The store is found through _bmad/custom/config.toml when the declared root is gone.
+R="$TMP/sdlc-bmad-config"
+sdlc_repo "$R" bmad-612 'spec-source: bmad out-of-date'
+assert_has "bmad: output_folder from config.toml is the fallback store" "$(sdlc_row bmad:epic-cart)" '"root":"_bmad-output"'
+
+# --- BMAD legacy sprint-status.yaml -------------------------------------------
+R="$TMP/sdlc-bmad-legacy"
+sdlc_repo "$R" bmad-legacy 'spec-source: bmad _bmad-output'
+row=$(sdlc_row bmad:epic-1)
+assert_has "bmad legacy: one unit per epic key" "$row" '"slug":"bmad:epic-1","kind":"bmad","id":"epic-1"'
+assert_has "bmad legacy: epic status" "$row" '"state":"in-progress","nativeState":"in-progress"'
+assert_has "bmad legacy: stories are tasks, ready-for-dev is ready" "$row" '{"id":"1-1-user-registration","done":true,"story":null,"parallel":false,"status":"done"},{"id":"1-2-login","done":false,"story":null,"parallel":false,"status":"in-progress"},{"id":"1-3-password-reset","done":false,"story":null,"parallel":false,"status":"ready"}'
+assert_has "bmad legacy: version from the manifest" "$row" '"frameworkVersion":"6.0.4"'
+assert_has "bmad legacy: backlog epic is proposed" "$(sdlc_row bmad:epic-2)" '"state":"proposed","nativeState":"backlog"'
+assert_has "bmad legacy: done epic is done" "$(sdlc_row bmad:epic-3)" '"state":"done","nativeState":"done"'
+assert_lacks "bmad legacy: retrospectives are not tasks" "$row" 'retrospective'
+
+# --- superpowers --------------------------------------------------------------
+R="$TMP/sdlc-superpowers"
+sdlc_repo "$R" superpowers 'spec-source: superpowers docs/superpowers'
+row=$(sdlc_row superpowers:2026-09-18-csv-import)
+assert_has "superpowers: slug drops the -design suffix" "$row" '"slug":"superpowers:2026-09-18-csv-import","kind":"superpowers","id":"2026-09-18-csv-import"'
+assert_has "superpowers: title is the document heading" "$row" '"title":"CSV Import Design"'
+assert_has "superpowers: a design with a plan is in-progress" "$row" '"state":"in-progress"'
+assert_has "superpowers: no requirements are inferred" "$row" '"requirements":[]'
+assert_has "superpowers: tasks are the paired plan checkboxes" "$row" '"tasks":[{"id":"1.1","done":true,"story":null,"parallel":false,"status":null},{"id":"1.2","done":true,"story":null,"parallel":false,"status":null},{"id":"2.1","done":false,"story":null,"parallel":false,"status":null},{"id":"2.2","done":false,"story":null,"parallel":false,"status":null}]'
+assert_has "superpowers: Files lines are planned paths, line ranges dropped" "$row" '"plannedPaths":["src/import/parser.ts","src/import/parser.test.ts","src/api/upload.ts"]'
+assert_has "superpowers: the plan is part of the unit" "$row" '"path":"docs/superpowers/plans/2026-09-19-csv-import.md"'
+row=$(sdlc_row superpowers:2026-09-20-orphan)
+assert_has "superpowers: a design with no plan is proposed" "$row" '"state":"proposed"'
+assert_has "superpowers: and has no tasks" "$row" '"tasks":[]'
+assert_lacks "superpowers: an unpaired plan is not a unit" "$(cd "$R" && sh "$Z" specs --json)" 'unpaired'
+assert_has "superpowers: an unpaired plan is reported" "$(cd "$R" && sh "$Z" spec-sources)" "unpaired-plan	docs/superpowers/plans/2026-09-01-unpaired.md"
+# All checked is done.
+sed 's/\[ \]/[x]/' "$R/docs/superpowers/plans/2026-09-19-csv-import.md" >"$R/plan.tmp" && mv "$R/plan.tmp" "$R/docs/superpowers/plans/2026-09-19-csv-import.md"
+assert_has "superpowers: all checked is done" "$(sdlc_row superpowers:2026-09-18-csv-import)" '"state":"done"'
+
+# --- --with-text: nothing leaks by default -------------------------------------
+R="$TMP/sdlc-text"
+sdlc_repo "$R" openspec 'spec-source: openspec openspec'
+plain=$(cd "$R" && sh "$Z" specs --json)
+for needle in 'CSV file of at most' 'Create the CSV parser' 'Operators re-key' '"text"' '"summary"' '"docs"' 'trackerRefs'; do
+    assert_lacks "default output has no text: $needle" "$plain" "$needle"
+done
+full=$(sdlc_row openspec:add-csv-import --with-text)
+assert_has "with-text: requirement text is the heading name" "$full" '"id":"R1","state":"added","scenarios":2,"capability":"csv-import","text":"CSV upload"'
+assert_has "with-text: task text" "$full" '"id":"1.1","done":true,"story":null,"parallel":false,"status":null,"text":"Create the CSV parser"'
+assert_has "with-text: the Why section is the summary" "$full" '"summary":"Operators re-key spreadsheets by hand.'
+assert_has "with-text: primary documents travel as markdown" "$full" '"docs":[{"path":"openspec/changes/add-csv-import/proposal.md","md":"# Change: Add CSV import\n'
+assert_has "with-text: renamed requirements read old -> new" "$full" '"text":"Import log -> Import history"'
+R2="$TMP/sdlc-text-bmad"
+sdlc_repo "$R2" bmad-612 'spec-source: bmad _bmad-output'
+R=$R2
+full=$(sdlc_row bmad:epic-cart --with-text)
+assert_has "with-text: tracker refs only here" "$full" '"trackerRefs":["PROJ-42"]'
+assert_has "with-text: the epic Description is the summary" "$full" '"summary":"Shoppers collect items before paying."'
+assert_lacks "with-text: the assignee still never travels" "$full" 'jdoe'
+if (cd "$R" && sh "$Z" specs --with-text) >/dev/null 2>&1; then
+    fail "--with-text without --json is refused"
+else
+    pass "--with-text without --json is refused"
+fi
+if command -v jq >/dev/null 2>&1; then
+    if (cd "$R" && sh "$Z" specs --json --with-text) | jq -e . >/dev/null 2>&1; then
+        pass "specs --json --with-text parses as JSON (jq)"
+    else
+        fail "specs --json --with-text parses as JSON (jq)"
+    fi
+fi
+
+# --- plain TSV ---------------------------------------------------------------
+R="$TMP/sdlc-openspec"
+tsv=$(cd "$R" && sh "$Z" specs)
+assert_has "plain specs lists source units" "$tsv" "openspec:add-csv-import	external	-		Add CSV import"
+assert_has "plain specs reports unresolved units with the reason" "$tsv" "openspec:orphan-change	external	unresolved		proposal.md missing"
+
+# --- accretion, comma trailers, and the per-slug trailer grammar ----------------
+R="$TMP/sdlc-accrete"
+sdlc_repo "$R" superpowers 'spec-source: superpowers docs/superpowers'
+cat >"$R/.zavet/specs/native-one.md" <<'EOF'
+---
+title: Native one
+origin: session
+confidence: high
+date: 2026-07-01
+paths: [lib/**]
+---
+body
+EOF
+mkdir -p "$R/src/import" "$R/src/api" "$R/lib"
+echo a >"$R/src/import/parser.ts"
+echo b >"$R/src/api/other.ts"
+gc add -A
+S=superpowers:2026-09-18-csv-import
+assert_has "paths are learned, never guessed: none before a citing commit" "$(sdlc_row $S)" '"paths":[]'
+gc commit -qm "feat: parser" -m "Spec: native-one, superpowers:2026-09-18-csv-import"
+assert_eq "a comma list accretes for every value" "$S	src/api/other.ts
+$S	src/import/parser.ts" "$( (cd "$R" && sh "$Z" spec-paths) | grep -F "$S" | sort )"
+assert_has "accreted paths are in the JSON row" "$(sdlc_row $S)" '"paths":["src/api/other.ts","src/import/parser.ts"]'
+assert_has "touched-not-planned is counted" "$(sdlc_row $S)" '"touchedUnplanned":1,'
+assert_eq "spec-match answers for an accreted path" "$S" "$(echo src/import/parser.ts | (cd "$R" && sh "$Z" spec-match))"
+assert_eq "an uncited path matches nothing" "" "$(echo src/import/never.ts | (cd "$R" && sh "$Z" spec-match))"
+memo=$(find "$R/.git" -maxdepth 1 -name 'zavet-accrete*' | head -1)
+if [ -n "$memo" ]; then pass "accretion is memoized beside the repo"; else fail "accretion is memoized beside the repo"; fi
+head1=$(gc rev-parse HEAD)
+assert_eq "the memo records the HEAD it covers" "#zavet-head $head1" "$(head -n 1 "$memo")"
+echo c >"$R/src/import/second.ts"
+gc add -A && gc commit -qm "feat: second" -m "Spec: $S"
+assert_has "a new HEAD re-walks and sees the new commit" "$( (cd "$R" && sh "$Z" spec-paths) )" "$S	src/import/second.ts"
+assert_eq "one memo per worktree, advanced to the new HEAD" "1:#zavet-head $(gc rev-parse HEAD)" "$(find "$R/.git" -maxdepth 1 -name 'zavet-accrete*' | wc -l | tr -d ' '):$(head -n 1 "$memo")"
+
+# Gate: the trailer must NAME the spec. Native specs get the same rule.
+printf 'x\n' >"$R/lib/l.rs"
+out=$(printf 'lib/l.rs\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "feat: x"))
+rc=$?
+assert_eq "gate nags a covered native path with no trailer" "1" "$rc"
+out=$(printf 'lib/l.rs\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "feat: x
+
+Spec: native-one"))
+assert_eq "gate: a trailer naming the spec satisfies it" "0:" "$?:$out"
+out=$(printf 'lib/l.rs\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "feat: x
+
+Spec: some-other-spec"))
+assert_eq "gate: a trailer for ANOTHER spec no longer satisfies (latent bug fixed)" "1" "$?"
+out=$(printf 'lib/l.rs\nsrc/import/parser.ts\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "feat: x
+
+Spec: native-one"))
+assert_eq "gate: citing one of two covering specs still owes the other" "1" "$?"
+assert_has "gate: and names the owed one" "$out" "$S"
+out=$(printf 'lib/l.rs\nsrc/import/parser.ts\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "feat: x
+
+Spec: native-one, $S"))
+assert_eq "gate: a comma list names both" "0:" "$?:$out"
+out=$(printf 'lib/l.rs\nsrc/import/parser.ts\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "feat: x
+Spec:   native-one ,   $S  "))
+assert_eq "gate: whitespace around comma values is tolerated" "0:" "$?:$out"
+# The nudge for a source unit asks for the trailer only.
+out=$(printf 'src/import/parser.ts\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "feat: x"))
+assert_has "gate: source nudge asks for the trailer" "$out" "Add a \`Spec: $S\` trailer"
+assert_has "gate: source nudge says the unit is read-only" "$out" "read-only here"
+assert_lacks "gate: source nudge never asks to update the spec" "$out" "update the sections"
+assert_lacks "gate: source nudge never asks to stage the spec file" "$out" "stage the spec file"
+# Once per session, like the native nudge.
+sess="sdlc-$$"
+rm -f "${TMPDIR:-/tmp}/zavet-spec-shown-$sess"
+printf 'src/import/parser.ts\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "feat: x" --session "$sess") >/dev/null
+out=$(printf 'src/import/parser.ts\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "feat: x" --session "$sess"))
+assert_eq "gate: second nudge in one session is silent" "0:" "$?:$out"
+rm -f "${TMPDIR:-/tmp}/zavet-spec-shown-$sess"
+
+# check: the same rule over commits.
+base=$(gc rev-parse HEAD)
+echo d >>"$R/lib/l.rs" && gc add -A && gc commit -qm "feat: cites the wrong spec" -m "Spec: some-other-spec"
+echo e >>"$R/lib/l.rs" && gc add -A && gc commit -qm "feat: cites the right spec" -m "Spec: native-one"
+echo f >>"$R/src/import/parser.ts" && gc add -A && gc commit -qm "feat: cites the unit in a list" -m "Spec: native-one, $S"
+echo g >>"$R/src/import/parser.ts" && gc add -A && gc commit -qm "feat: cites nothing"
+out=$( (cd "$R" && sh "$Z" check "$base..HEAD" 2>/dev/null) )
+assert_eq "check: only commits not naming the covering spec warn" "warn-spec	native-one	feat: cites the wrong spec
+warn-spec	$S	feat: cites nothing" "$(printf '%s\n' "$out" | awk -F '\t' '{ print $1 "\t" $3 "\t" $4 }' | sort)"
+
+# --- memo is optional: an unwritable git dir fails open -------------------------
+R="$TMP/sdlc-accrete"
+chmod a-w "$R/.git"
+rm -f "$R"/.git/zavet-accrete* 2>/dev/null
+out=$( (cd "$R" && sh "$Z" spec-paths 2>/dev/null) )
+rc=$?
+chmod u+w "$R/.git"
+assert_eq "unwritable memo location still answers" "0" "$rc"
+assert_has "and the answer is the same" "$out" "$S	src/import/parser.ts"
+
+# --- read-only invariants ----------------------------------------------------------
+R="$TMP/sdlc-readonly"
+sdlc_repo "$R" openspec 'spec-source: openspec openspec' 'spec-source: superpowers docs/superpowers'
+cp -R "$SDLC/superpowers/docs" "$R/" && gc add -A && gc commit -qm "chore: add superpowers" >/dev/null
+cat >"$R/.zavet/decisions/ZAVET-00001-first.md" <<'EOF'
+---
+id: ZAVET-00001
+title: First
+status: active
+guards: [guarded/**]
+---
+body
+EOF
+printf -- '---\ntitle: N\norigin: session\nconfidence: high\ndate: 2026-07-01\npaths: [nat/**]\n---\nsee ZAVET-00001\n' >"$R/.zavet/specs/nat.md"
+gc add -A && gc commit -qm "chore: records" >/dev/null
+digest() { (cd "$R" && find openspec docs -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$f" "$(git hash-object "$f")"; done); }
+before=$(digest)
+(cd "$R" && sh "$Z" renumber --force ZAVET-00001 ZAVET-00009) >/dev/null 2>&1
+(cd "$R" && sh "$Z" index) >/dev/null 2>&1
+(cd "$R" && sh "$Z" audit) >/dev/null 2>&1
+(cd "$R" && sh "$Z" specs --json --with-text) >/dev/null 2>&1
+(cd "$R" && sh "$Z" adapters) >/dev/null 2>&1
+assert_eq "renumber, index, audit, specs and adapters never write into a source root" "$before" "$(digest)"
+assert_eq "the native spec WAS rewritten by renumber (the control)" "see ZAVET-00009" "$(tail -1 "$R/.zavet/specs/nat.md")"
+# A staged source file never satisfies the gate or the check.
+S=openspec:add-csv-import
+echo y >"$R/src.txt"
+(cd "$R" && sh "$Z" prefix ZAVET) >/dev/null 2>&1
+mkdir -p "$R/lib"
+echo 1 >"$R/lib/impl.ts"
+gc add -A && gc commit -qm "feat: impl" -m "Spec: $S" >/dev/null
+out=$(printf 'lib/impl.ts\nopenspec/changes/add-csv-import/tasks.md\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "feat: more"))
+assert_eq "gate: staging the unit's own files does not satisfy it" "1" "$?"
+assert_has "gate: still asks for the trailer" "$out" "Add a \`Spec: $S\` trailer"
+base=$(gc rev-parse HEAD)
+echo 2 >>"$R/lib/impl.ts"
+echo '- [x] 1.2 done' >>"$R/openspec/changes/add-csv-import/tasks.md"
+gc add -A && gc commit -qm "feat: edits the spec files alongside" >/dev/null
+out=$( (cd "$R" && sh "$Z" check "$base..HEAD" 2>/dev/null) )
+assert_has "check: touching the unit's files is not an exemption" "$out" "warn-spec"
+# The context payload never tells an agent to update a source spec.
+ctx=$(cd "$R" && sh "$Z" context)
+assert_has "context: names the declared source kinds" "$ctx" "### Spec sources (read-only: cite them, never edit them)"
+assert_has "context: lists active units with task counts" "$ctx" "- openspec:add-csv-import — Add CSV import (tasks "
+assert_has "context: says to cite the unit" "$ctx" 'Spec: <kind>:<id>'
+assert_has "context: scopes spec maintenance to .zavet/specs" "$ctx" "covers .zavet/specs/ only"
+assert_lacks "context: no unit is listed as a living spec to maintain" "$(printf '%s\n' "$ctx" | awk '/^### Living specs/,/^Capture bar/')" "openspec:"
+agents=$(cd "$R" && sh "$Z" adapters >/dev/null 2>&1; cat AGENTS.md)
+assert_has "AGENTS.md carries the stable source section" "$agents" "- openspec in openspec"
+assert_lacks "AGENTS.md carries no churning unit list" "$agents" "add-csv-import"
+
+# --- audit drift classes ---------------------------------------------------------------
+R="$TMP/sdlc-audit"
+sdlc_repo "$R" superpowers 'spec-source: superpowers docs/superpowers'
+S=superpowers:2026-09-18-csv-import
+audit=$(cd "$R" && sh "$Z" audit | grep -v '^adapter-\|^githook')
+assert_has "audit: a unit with no accreted or declared path says so" "$audit" "paths-none-yet	$S"
+assert_has "audit: the orphan design too" "$audit" "paths-none-yet	superpowers:2026-09-20-orphan"
+assert_lacks "audit: no planned-not-touched without a citing commit" "$audit" "planned-not-touched"
+mkdir -p "$R/src/import"
+echo 1 >"$R/src/import/parser.ts"
+echo 2 >"$R/src/import/extra.ts"
+gc add -A && gc commit -qm "feat: parser" -m "Spec: $S" >/dev/null
+audit=$(cd "$R" && sh "$Z" audit | grep -v '^adapter-\|^githook')
+assert_has "audit: planned files nothing touched" "$audit" "planned-not-touched	$S	2	src/import/parser.test.ts,src/api/upload.ts"
+assert_has "audit: touched files nobody planned" "$audit" "touched-not-planned	$S	1"
+assert_lacks "audit: a unit with paths is not paths-none-yet" "$audit" "paths-none-yet	$S"
+assert_lacks "audit: no edit-with-implementation yet" "$audit" "source-spec-edited-in-implementing-change"
+echo 3 >>"$R/src/import/parser.ts"
+echo '' >>"$R/docs/superpowers/specs/2026-09-18-csv-import-design.md"
+gc add -A && gc commit -qm "feat: parser again and a design edit" -m "Spec: $S" >/dev/null
+sha7=$(gc rev-parse --short=7 HEAD)
+audit=$(cd "$R" && sh "$Z" audit | grep -v '^adapter-\|^githook')
+assert_has "audit: the spec edited in the implementing commit" "$audit" "source-spec-edited-in-implementing-change	$S	$sha7"
+# A commit that edits only the checkboxes with code is not that signature.
+R2="$TMP/sdlc-audit-tasks"
+sdlc_repo "$R2" superpowers 'spec-source: superpowers docs/superpowers'
+mkdir -p "$R2/src/import"
+echo 1 >"$R2/src/import/parser.ts"
+sed 's/\[ \]/[x]/' "$R2/docs/superpowers/plans/2026-09-19-csv-import.md" >"$R2/p.tmp" && mv "$R2/p.tmp" "$R2/docs/superpowers/plans/2026-09-19-csv-import.md"
+git -C "$R2" add -A && git -C "$R2" commit -qm "feat: parser, boxes ticked" -m "Spec: $S"
+assert_lacks "audit: ticking plan checkboxes alongside code is not a spec edit" "$(cd "$R2" && sh "$Z" audit)" "source-spec-edited"
+# stale-spec for a source unit anchors on its own files and ignores citing commits.
+R3="$TMP/sdlc-audit-stale"
+sdlc_repo "$R3" superpowers 'spec-source: superpowers docs/superpowers'
+mkdir -p "$R3/src"
+echo 1 >"$R3/src/a.ts"
+git -C "$R3" add -A && git -C "$R3" commit -qm "feat: a" -m "Spec: $S"
+assert_lacks "audit: commits citing the unit are not stale drift" "$(cd "$R3" && sh "$Z" audit)" "stale-spec"
+echo 2 >>"$R3/src/a.ts"
+git -C "$R3" commit -qam "feat: a again, uncited"
+assert_has "audit: an uncited commit on the unit's paths is stale drift" "$(cd "$R3" && sh "$Z" audit)" "stale-spec	$S	1	"
+# Unresolved units are reported.
+assert_has "audit: unresolved units are reported" "$(cd "$TMP/sdlc-openspec" && sh "$Z" audit)" "source-unresolved	openspec:orphan-change	proposal.md missing"
+
+# --- declared globs are coverage, from the config line ----------------------------------
+R="$TMP/sdlc-declared"
+sdlc_repo "$R" superpowers 'spec-source: superpowers docs/superpowers src/import/** lib/*.rs'
+assert_eq "declared globs cover every unit under the source" "superpowers:2026-09-18-csv-import" \
+    "$(echo src/import/x.ts | (cd "$R" && sh "$Z" spec-match) | sort | head -1)"
+assert_has "declared globs show up in the JSON paths" "$(sdlc_row superpowers:2026-09-18-csv-import)" '"paths":["src/import/**","lib/*.rs"]'
+
+# --- detection and adoption -----------------------------------------------------------------
+R="$TMP/sdlc-detect"
+new_repo "$R"
+printf 'prefix: ZAVET\n# keep me\n' >"$R/.zavet/config"
+mkdir -p "$R/openspec/changes" "$R/.specify" "$R/specs" "$R/_bmad/custom" "$R/docs/superpowers/specs"
+printf '[core]\noutput_folder = "{project-root}/planning-out"\n' >"$R/_bmad/custom/config.toml"
+mkdir -p "$R/planning-out"
+det=$(cd "$R" && sh "$Z" spec-sources --detect)
+assert_eq "detect finds every framework, each marked new" "detect	openspec	openspec	new
+detect	speckit	specs	new
+detect	bmad	planning-out	new
+detect	superpowers	docs/superpowers	new" "$det"
+assert_eq "detect alone writes nothing" "prefix: ZAVET
+# keep me" "$(cat "$R/.zavet/config")"
+(cd "$R" && sh "$Z" spec-sources --write) >/dev/null
+assert_eq "write appends the missing lines and keeps the rest" "prefix: ZAVET
+# keep me
+spec-source: openspec openspec
+spec-source: speckit specs
+spec-source: bmad planning-out
+spec-source: superpowers docs/superpowers" "$(cat "$R/.zavet/config")"
+assert_eq "write is idempotent" "0" "$( (cd "$R" && sh "$Z" spec-sources --write | grep -c '^written') )"
+printf 'spec-source: openspec openspec' >"$R/.zavet/config"
+(cd "$R" && sh "$Z" spec-sources --write) >/dev/null
+assert_eq "write repairs a config with no final newline" "spec-source: openspec openspec
+spec-source: speckit specs
+spec-source: bmad planning-out
+spec-source: superpowers docs/superpowers" "$(cat "$R/.zavet/config")"
+# init adopts what is already there.
+R="$TMP/sdlc-init"
+rm -rf "$R" && mkdir -p "$R/openspec/changes" "$R/docs/superpowers"
+git -C "$R" init -q
+git -C "$R" config user.email zavet-test@example.invalid
+git -C "$R" config user.name "zavet test"
+out=$( (cd "$R" && sh "$Z" init --prefix ZAVET) 2>&1 )
+assert_has "init declares detected spec sources" "$out" "declared spec source openspec openspec"
+assert_has "init keeps the scaffolded keys" "$(cat "$R/.zavet/config")" "prefix: ZAVET"
+assert_has "init wrote the source line" "$(cat "$R/.zavet/config")" "spec-source: superpowers docs/superpowers"
+R="$TMP/sdlc-init-plain"
+rm -rf "$R" && mkdir -p "$R"
+git -C "$R" init -q
+git -C "$R" config user.email zavet-test@example.invalid
+git -C "$R" config user.name "zavet test"
+assert_lacks "init with no frameworks says nothing about sources" "$( (cd "$R" && sh "$Z" init --prefix ZAVET) 2>&1 )" "spec source"
+
+# --- a repo with no spec-source lines pays nothing and changes nothing --------------------------
+R="$TMP/sdlc-none"
+new_repo "$R"
+printf -- '---\ntitle: N\norigin: session\nconfidence: high\ndate: 2026-07-01\npaths: [nat/**]\n---\nb\n' >"$R/.zavet/specs/nat.md"
+assert_eq "no sources: spec-paths is exactly the native table" "nat	nat/**" "$( (cd "$R" && sh "$Z" spec-paths) )"
+assert_eq "no sources: specs TSV is exactly the native rows" "nat	session	high	2026-07-01	N" "$( (cd "$R" && sh "$Z" specs) )"
+assert_eq "no sources: nothing in git dir" "" "$(find "$R/.git" -maxdepth 1 -name 'zavet-*')"
+assert_eq "no sources: spec-sources reports nothing" "" "$( (cd "$R" && sh "$Z" spec-sources) )"
+
+# --- accretion and history memos: incremental, per worktree, never poisoned ---------------------
+R="$TMP/sdlc-incr"
+sdlc_repo "$R" superpowers 'spec-source: superpowers docs/superpowers'
+S=superpowers:2026-09-18-csv-import
+mkdir -p "$R/src"
+n=0
+while [ "$n" -lt 4 ]; do
+    n=$((n + 1))
+    echo "$n" >"$R/src/f$n.ts"
+    gc add -A && gc commit -qm "feat: f$n" -m "Spec: $S"
+done
+(cd "$R" && sh "$Z" specs --json) >/dev/null
+memo="$R/.git/zavet-accrete.memo"
+hist=$(find "$R/.git" -maxdepth 1 -name 'zavet-unithist-*.memo' | head -1)
+assert_eq "incremental: the memo covers HEAD" "#zavet-head $(gc rev-parse HEAD)" "$(head -n 1 "$memo")"
+echo 5 >"$R/src/f5.ts"
+gc add -A && gc commit -qm "feat: f5" -m "Spec: $S"
+echo 6 >>"$R/docs/superpowers/specs/2026-09-18-csv-import-design.md"
+gc add -A && gc commit -qm "docs: design edit"
+(cd "$R" && sh "$Z" specs --json) >"$TMP/incr.json"
+cp "$memo" "$TMP/incr.acc"
+cp "$hist" "$TMP/incr.hist"
+rm -f "$R"/.git/zavet-accrete* "$R"/.git/zavet-unithist*
+(cd "$R" && sh "$Z" specs --json) >"$TMP/full.json"
+assert_file "incremental: the accretion memo is byte-identical to a full rebuild" "$memo" "$TMP/incr.acc"
+sort "$(find "$R/.git" -maxdepth 1 -name 'zavet-unithist-*.memo' | head -1)" >"$TMP/full.hist.sorted"
+sort "$TMP/incr.hist" >"$TMP/incr.hist.sorted"
+assert_file "incremental: the history memo holds the same rows as a full rebuild" "$TMP/full.hist.sorted" "$TMP/incr.hist.sorted"
+assert_file "incremental: specs --json is unchanged by the memo path" "$TMP/full.json" "$TMP/incr.json"
+assert_lacks "oid: a committed regular file never has a null oid" "$(cat "$TMP/full.json")" '"oid":null'
+# A stage failure must surface as a non-zero exit, never as an empty list.
+mkdir -p "$TMP/failbin"
+realawk=$(command -v awk)
+# shellcheck disable=SC2016 # the generated script must keep its own $@ literal
+printf '#!/bin/sh\nfor a in "$@"; do\n    [ "$a" = mode=json ] && exit 2\ndone\nexec "%s" "$@"\n' "$realawk" >"$TMP/failbin/awk"
+chmod +x "$TMP/failbin/awk"
+out=$( (cd "$R" && PATH="$TMP/failbin:$PATH" sh "$Z" specs --json 2>/dev/null) )
+rc=$?
+if [ "$rc" -ne 0 ]; then pass "specs --json: a failing emit stage exits non-zero"; else fail "specs --json: a failing emit stage exits non-zero"; fi
+assert_eq "specs --json: and prints no partial list" "" "$out"
+# A history rewrite (HEAD no longer descends from the memo) rebuilds.
+gc reset -q --hard HEAD~1
+echo 7 >"$R/src/f7.ts"
+gc add -A && gc commit -qm "feat: f7" -m "Spec: $S"
+assert_has "rewrite: the rebuilt table has the new commit" "$( (cd "$R" && sh "$Z" spec-paths) )" "$S	src/f7.ts"
+assert_eq "rewrite: and the memo covers the new HEAD" "#zavet-head $(gc rev-parse HEAD)" "$(head -n 1 "$memo")"
+# One memo per worktree: a linked worktree neither reads nor clobbers the main one.
+gc worktree add -q -b wt-branch "$TMP/sdlc-incr-wt" >/dev/null 2>&1
+mainhead=$(head -n 1 "$memo")
+(cd "$TMP/sdlc-incr-wt" && sh "$Z" spec-paths) >/dev/null
+assert_eq "worktree: the main memo is untouched" "$mainhead" "$(head -n 1 "$memo")"
+wtmemo=$(find "$R/.git/worktrees" -name 'zavet-accrete.memo' | head -1)
+if [ -n "$wtmemo" ]; then pass "worktree: it keeps its own memo in its own git dir"; else fail "worktree: it keeps its own memo in its own git dir"; fi
+gc worktree remove --force "$TMP/sdlc-incr-wt" >/dev/null 2>&1
+# Memos nobody touched for a week are pruned when a new one is written.
+touch -t 202001010000 "$R/.git/zavet-accrete-0123456789abcdef" "$R/.git/zavet-unithist-0123-4567"
+echo 8 >"$R/src/f8.ts"
+gc add -A && gc commit -qm "feat: f8" -m "Spec: $S"
+(cd "$R" && sh "$Z" spec-paths) >/dev/null
+assert_eq "stale memos older than a week are pruned" "" "$(find "$R/.git" -maxdepth 1 \( -name 'zavet-accrete-0123*' -o -name 'zavet-unithist-0123*' \))"
+# A failed `git log` must not leave a poisoned (empty) memo behind.
+R="$TMP/sdlc-poison"
+sdlc_repo "$R" superpowers 'spec-source: superpowers docs/superpowers'
+mkdir -p "$R/src" "$TMP/fakebin"
+echo 1 >"$R/src/a.ts"
+gc add -A && gc commit -qm "feat: a" -m "Spec: $S"
+realgit=$(command -v git)
+# shellcheck disable=SC2016 # the generated script must keep its own $@ literal
+printf '#!/bin/sh\nfor a in "$@"; do\n    [ "$a" = log ] && exit 3\ndone\nexec "%s" "$@"\n' "$realgit" >"$TMP/fakebin/git"
+chmod +x "$TMP/fakebin/git"
+(cd "$R" && PATH="$TMP/fakebin:$PATH" sh "$Z" spec-paths) >/dev/null
+rc=$?
+assert_eq "git log failure: still answers (fail open)" "0" "$rc"
+assert_eq "git log failure: no memo is written" "" "$(find "$R/.git" -maxdepth 1 \( -name 'zavet-accrete*' -o -name 'zavet-unithist*' \))"
+assert_has "git log working again: the table is complete" "$( (cd "$R" && sh "$Z" spec-paths) )" "$S	src/a.ts"
+
+# --- archived and removed units keep only accreted paths -----------------------------------------
+R="$TMP/sdlc-archived"
+new_repo "$R"
+printf 'prefix: ZAVET\nspec-source: openspec openspec src/**\n' >"$R/.zavet/config"
+mkdir -p "$R/openspec/changes/live" "$R/openspec/changes/archive/2026-10-01-old" "$R/src"
+printf '# Change: Live\n\n## Why\nx\n' >"$R/openspec/changes/live/proposal.md"
+printf '# Change: Old\n\n## Why\nx\n' >"$R/openspec/changes/archive/2026-10-01-old/proposal.md"
+echo 1 >"$R/src/a.ts"
+gc add -A && gc commit -qm "feat: seed" -m "Spec: openspec:old"
+paths=$( (cd "$R" && sh "$Z" spec-paths) )
+assert_has "archived: the live unit still claims the declared glob" "$paths" "openspec:live	src/**"
+assert_lacks "archived: the archived unit does not claim the declared glob" "$paths" "openspec:old	src/**"
+assert_has "archived: but keeps what its own commits touched" "$paths" "openspec:old	src/a.ts"
+
+# --- the gate nudge names at most five slugs ------------------------------------------------------
+R="$TMP/sdlc-cap"
+new_repo "$R"
+printf 'prefix: ZAVET\nspec-source: openspec openspec src/**\n' >"$R/.zavet/config"
+n=0
+while [ "$n" -lt 8 ]; do
+    n=$((n + 1))
+    mkdir -p "$R/openspec/changes/u$n"
+    printf '# Change: U%s\n\n## Why\nx\n' "$n" >"$R/openspec/changes/u$n/proposal.md"
+done
+gc add -A && gc commit -qm "chore: units"
+out=$(printf 'src/x.ts\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "feat: x"))
+assert_has "cap: names the first five and the rest as a count" "$out" "openspec:u1 openspec:u2 openspec:u3 openspec:u4 openspec:u5 +3 more"
+assert_lacks "cap: and not the sixth" "$out" "openspec:u6"
+assert_has "cap: the trailer hint is capped the same way" "$out" "Spec: openspec:u1, openspec:u2, openspec:u3, openspec:u4, openspec:u5, +3 more"
+
+# --- never read through a symlink ------------------------------------------------------------------
+R="$TMP/sdlc-symlink"
+new_repo "$R"
+printf 'prefix: ZAVET\nspec-source: openspec openspec\n' >"$R/.zavet/config"
+mkdir -p "$R/openspec/changes/linked" "$R/openspec/changes/plain" "$TMP/outside"
+printf '# Change: SECRET-OUTSIDE\n\n## Why\nTOPSECRET\n' >"$TMP/outside/proposal.md"
+ln -s "$TMP/outside/proposal.md" "$R/openspec/changes/linked/proposal.md"
+printf '# Change: Plain\n\n## Why\nfine\n' >"$R/openspec/changes/plain/proposal.md"
+gc add -A && gc commit -qm "chore: seed"
+all=$(cd "$R" && sh "$Z" specs --json --with-text)
+assert_lacks "symlink: the outside file's text never leaves" "$all" "TOPSECRET"
+assert_lacks "symlink: nor its title" "$all" "SECRET-OUTSIDE"
+assert_has "symlink: the regular file still reads" "$all" "fine"
+assert_lacks "symlink: the link is not a listed file" "$(printf '%s\n' "$all" | grep -F '"slug":"openspec:linked"')" 'linked/proposal.md'
+# A directory that escapes the repo is skipped as well.
+mkdir -p "$TMP/outside-dir"
+printf '# Change: ESCAPED\n\n## Why\nTOPSECRET2\n' >"$TMP/outside-dir/proposal.md"
+rm -rf "$R/openspec/changes/plain"
+ln -s "$TMP/outside-dir" "$R/openspec/changes/plain"
+all=$(cd "$R" && sh "$Z" specs --json --with-text)
+assert_lacks "symlink: a linked directory outside the repo is not read" "$all" "TOPSECRET2"
+
+# --- trailer grammar: CRLF, uppercase and plus in ids --------------------------------------------
+R="$TMP/sdlc-grammar"
+new_repo "$R"
+printf 'prefix: ZAVET\nspec-source: superpowers docs/superpowers src/**\n' >"$R/.zavet/config"
+printf -- '---\ntitle: N\norigin: session\nconfidence: high\ndate: 2026-07-01\npaths: [lib/**]\n---\nb\n' >"$R/.zavet/specs/native-one.md"
+mkdir -p "$R/docs/superpowers/specs" "$R/src" "$R/lib"
+printf '# Design\n\n## Summary\nleft\tright\n' >"$R/docs/superpowers/specs/2026-10-01-Upper+Plus-design.md"
+gc add -A && gc commit -qm "chore: seed"
+U=superpowers:2026-10-01-Upper+Plus
+out=$(printf 'lib/l.rs\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "$(printf 'feat: x\n\nSpec: native-one\r')"))
+assert_eq "crlf: a CRLF message satisfies the trailer" "0:" "$?:$out"
+out=$(printf 'src/a.ts\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "$(printf 'feat: x\n\nSpec: %s\r' "$U")"))
+assert_eq "uppercase and plus: an id from a file name is a valid slug" "0:" "$?:$out"
+echo 1 >"$R/src/a.ts"
+printf 'feat: a\n\nSpec: %s\r\n' "$U" >"$TMP/crlf.msg"
+gc add -A && gc commit -q -F "$TMP/crlf.msg"
+assert_has "crlf and uppercase: the accretion keeps the path" "$( (cd "$R" && sh "$Z" spec-paths) )" "$U	src/a.ts"
+assert_lacks "plus: the citing commit is not stale drift (regex metacharacters are escaped)" "$(cd "$R" && sh "$Z" audit)" "stale-spec"
+assert_has "tabs in a summary do not split the stream" "$(cd "$R" && sh "$Z" specs --json --with-text | grep -F '"slug":"superpowers:2026-10-01-Upper+Plus"')" '"summary":"left right"'
+# A native title holding a tab keeps the TSV columns where they are.
+printf -- '---\ntitle: tab\there\norigin: session\nconfidence: high\ndate: 2026-07-01\npaths: [lib/**]\n---\nb\n' >"$R/.zavet/specs/tabbed.md"
+assert_eq "tabs in a native title do not shift the columns" "5" "$( (cd "$R" && sh "$Z" specs) | grep '^tabbed' | awk -F '\t' '{ print NF }')"
+
+# --- gate details: quotepath, fixed-string session memory -----------------------------------------
+R="$TMP/sdlc-gate"
+new_repo "$R"
+printf 'prefix: ZAVET\n' >"$R/.zavet/config"
+printf -- '---\ntitle: Docs\norigin: session\nconfidence: high\ndate: 2026-07-01\npaths: [docs/**]\n---\nb\n' >"$R/.zavet/specs/docs-spec.md"
+gc add -A && gc commit -qm "chore: seed"
+mkdir -p "$R/docs"
+echo x >"$R/docs/caf$(printf '\303\251').md"
+gc add -A
+out=$(cd "$R" && sh "$Z" gate --staged --message "feat: x")
+assert_eq "gate --staged sees a non-ASCII path unquoted" "1" "$?"
+assert_has "gate --staged names the covering spec" "$out" "docs-spec"
+printf -- '---\ntitle: V1\norigin: session\nconfidence: high\ndate: 2026-07-01\npaths: [lib/**]\n---\nb\n' >"$R/.zavet/specs/v1x2.md"
+printf -- '---\ntitle: V1b\norigin: session\nconfidence: high\ndate: 2026-07-01\npaths: [lib/**]\n---\nb\n' >"$R/.zavet/specs/v1.2.md"
+sess="fixed-$$"
+printf 'v1x2\n' >"${TMPDIR:-/tmp}/zavet-spec-shown-$sess"
+out=$(printf 'lib/l.rs\n' | (cd "$R" && sh "$Z" gate --paths-from - --message "feat: x" --session "$sess"))
+assert_has "session memory compares slugs literally (v1x2 does not hide v1.2)" "$out" "v1.2"
+rm -f "${TMPDIR:-/tmp}/zavet-spec-shown-$sess"
+
+# --- spec-sources --write refuses a root it cannot write unambiguously ----------------------------
+R="$TMP/sdlc-badroot"
+new_repo "$R"
+printf 'prefix: ZAVET\n' >"$R/.zavet/config"
+mkdir -p "$R/_bmad/custom" "$R/my out"
+printf '[core]\noutput_folder = "{project-root}/my out"\n' >"$R/_bmad/custom/config.toml"
+out=$(cd "$R" && sh "$Z" spec-sources --write)
+assert_has "write: a root with whitespace is reported invalid" "$out" "source-root-invalid	bmad	my out"
+assert_lacks "write: and never written" "$(cat "$R/.zavet/config")" "spec-source"
 
 # ---------------------------------------------------------------- summary --
 if [ "$fails" -gt 0 ]; then

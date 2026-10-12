@@ -60,7 +60,7 @@ Refs: D-0042
 ```
 
 Allowed keys: `Why:` `Rejected:` `Constraint:` `Refs:` `Supersedes:` `Spec:`.
-One line each; multiple trailers per commit are fine.
+One line each (`Spec:` may list several slugs, comma separated); multiple trailers per commit are fine.
 
 **Structural decisions → /zavet:decide.** Anything that shapes future changes
 (architecture choices, invariants, deliberate non-obvious behavior) becomes an
@@ -103,6 +103,24 @@ asks for.** While working:
 Explicit entry points exist for the non-default flows: `/zavet:spec design
 <feature>` (spec before code) and `/zavet:spec backfill <feature>`
 (reconstruct from existing code, honesty rules apply).
+
+## Spec sources (OpenSpec, Spec Kit, BMAD, superpowers)
+
+If `.zavet/config` has `spec-source:` lines, units from those frameworks count
+as specs you cite. They are read-only to you here.
+
+- At session start, name the unit you are working under
+  (`zavet specs --json` lists them).
+- Cite it on commits as `Spec: <kind>:<id>`, for example
+  `Spec: openspec:add-csv-import`. A comma list is fine
+  (`Spec: capture-pipeline, speckit:007-csv-import`). That trailer is how the
+  unit's `paths` grow. Nothing derives them from content.
+- Never write into a declared source root except through the framework's own
+  commands (`/openspec-*`, `/speckit.*`, `bmad-*`, the superpowers skills).
+- Never flip `verified` on a source-backed spec. It is permanently `false`.
+- The framework's checkboxes are the framework's claim. Quote them as that.
+  Never write compliance percentages or "requirement satisfied" statements.
+- Adopt a new framework with /zavet:spec-adopt.
 
 ## Honoring guards
 

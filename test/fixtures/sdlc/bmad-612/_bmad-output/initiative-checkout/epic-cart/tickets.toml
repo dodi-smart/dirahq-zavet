@@ -1,0 +1,20 @@
+[[tickets]]
+id = "story-cart-ui-shell"
+type = "story"
+title = "Cart UI shell"
+after = []
+hitl = false
+
+[[tickets]]
+id = "story-cart-api"
+type = "story"
+title = "Cart API"
+after = ["story-cart-ui-shell"]
+hitl = true
+
+[[tickets]]
+id = "story-cart-empty-state"
+type = "story"
+title = "Empty cart state"
+after = ["story-cart-api"]
+hitl = false

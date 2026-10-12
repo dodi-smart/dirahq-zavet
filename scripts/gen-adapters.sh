@@ -12,7 +12,7 @@
 # only inside Claude Code; `argument-hint`, which Claude Code rejects as a
 # SKILL.md key; and `/zavet:x` command names, which only exist for a plugin.
 #
-# Two hand-maintained copies of eight documents would diverge inside a month,
+# Two hand-maintained copies of nine documents would diverge inside a month,
 # and the divergence would be invisible: both files look fine, they just teach
 # different things. So commands/*.md stay canonical — they are the reviewed
 # prose — and this script derives the portable form mechanically. CI runs it
@@ -53,7 +53,7 @@ CHECK=0
 [ "${1:-}" = "--check" ] && CHECK=1
 
 # The workflows, in the order they appear in the README's command table.
-COMMANDS="init decide why wiki backfill spec audit verify"
+COMMANDS="init decide why wiki backfill spec spec-adopt audit verify"
 
 stale=0
 wrote=0

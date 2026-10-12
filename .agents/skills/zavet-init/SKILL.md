@@ -45,6 +45,11 @@ Initialize the zavet knowledge layer in this repository.
    `--grok` (`init --prefix <PREFIX> --grok`). Ask the user whether their team
    uses Grok Build; if it does, pass `--grok`, otherwise leave it out. It can
    be added later with `zavet adapters --grok`.
+
+   Note: `init` also auto-detects spec frameworks (`openspec/`, `.specify/` with
+   `specs/`, `_bmad/`, `docs/superpowers/`) and writes `spec-source:` lines to
+   `.zavet/config`. Mention what it found. To review or redo that on its own,
+   or to see how the units resolve, use zavet-spec-adopt.
 3. Activate the git-hook floor: `.zavet/bin/zavet hooks install`. It sets
    `core.hooksPath` and is what enforces the guard wall for anyone whose harness
    has no hook API of its own.
