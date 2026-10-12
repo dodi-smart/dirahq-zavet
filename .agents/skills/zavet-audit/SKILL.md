@@ -26,7 +26,8 @@ flips, no verification. It surfaces what a human should look at.
    `sh ".zavet/bin/zavet" audit` — type-tagged TSV rows:
    `stale-spec slug n since-sha`, `stale-decision id n since-sha`,
    `guard-pressure id glob matched total`, `uncovered-invariant id file`,
-   `long-record id lines`, `style-flag id-or-slug metric count`.
+   `long-record id lines`, `style-flag id-or-slug metric count`, and, for repos
+   with spec sources, the drift rows described in step 9.
 3. **Conflicts** (unless focused elsewhere): for each `stale-decision`,
    worst drift first, open the record
    (`sh ".zavet/bin/zavet" decision-path <id>`), read its
@@ -62,10 +63,26 @@ flips, no verification. It surfaces what a human should look at.
    Report the count per record and name the worst few. A record with several is
    worth a reword pass, which is allowed: fixing wording is not rewriting the
    decision. A single hit inside a quoted error message is not a problem.
-9. Follow the writing-style rule in the zavet skill: plain, active voice, one idea
+9. **Spec-source drift** (only when `.zavet/config` declares `spec-source:`
+   lines). Four advisory rows, all mechanical facts that re-derive from git.
+   None is a judgement, and none means the work is wrong:
+   - `source-spec-edited-in-implementing-change`: a commit or branch touched
+     both a unit's framework files and the code carrying its `Spec:` trailer.
+     That is the signature of a plan edited to match the code. Sometimes it is
+     a fair correction. Report the unit and commits and let a human decide.
+   - `planned-not-touched`: files the framework's tasks planned that no commit
+     under the unit touched. They may be unfinished, renamed, or moved.
+   - `touched-not-planned`: files commits under the unit touched that no task
+     planned. They may be unplanned work or a plan that was never updated.
+   - `paths-none-yet`: the unit has no `paths` yet (no `Spec:` trailer has
+     landed under it, and none were declared). It is uncovered, not clean.
+   Report the counts and a few examples per class. Do not turn them into a
+   score, a percentage, or a statement about compliance. The framework's task
+   checkboxes are its own claim.
+10. Follow the writing-style rule in the zavet skill: plain, active voice, one idea
    per sentence, no em dashes, no jargon nouns, sentence case.
    Compose the report in that order. Conflicts, Stale specs, Guard pressure,
-   Unverified invariants, Over-long records, Style flags. Give each one
+   Unverified invariants, Over-long records, Style flags, Spec-source drift. Give each one
    concrete next steps (`zavet-decide` to supersede or correct, `zavet-spec` to
    refresh, `zavet-verify` to check, glob narrowing). End with the one-line
    health summary: N decisions (M stale, U unchecked), K specs (J stale),

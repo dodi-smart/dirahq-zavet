@@ -1,0 +1,5 @@
+[[tickets]]
+id = "story-payments-card"
+type = "story"
+title = "Card payment"
+after = []

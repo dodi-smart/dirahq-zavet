@@ -15,6 +15,9 @@ MARK_SPECS_END="<!-- zavet:specs:end -->"
 # cmd_version — dira never gates on it, it only surfaces skew).
 ZAVET_EMIT_SCHEMA=1
 ZAVET_MIN_DIRA="0.1.0"
+# Capability flag: `zavet specs --json` exists. A consumer checks it before
+# calling the command; absence means "older build, parse .zavet/specs/ files".
+ZAVET_SPECS_JSON=1
 
 usage() {
     cat <<'EOF'
@@ -47,7 +50,18 @@ Usage:
   zavet match-batch           Read repo-relative paths (one per line) on stdin,
                               print unique ids of active decisions guarding them
   zavet decision-path <id>    Print the repo-relative path of a decision file
-  zavet specs                 Print TAB-separated: slug, origin, confidence, date, title
+  zavet specs [--json [--with-text]]
+                              Print TAB-separated: slug, origin, confidence,
+                              date, title (native specs, then source-backed
+                              units). --json prints one JSON object per spec,
+                              native and source-backed; requirement and task
+                              text only with --with-text
+  zavet spec-sources [--detect] [--write] [--list]
+                              Report the spec-source: lines in .zavet/config
+                              and how many units each resolves. --detect lists
+                              frameworks found in the repo (OpenSpec, Spec Kit,
+                              BMAD, superpowers); --write declares the missing
+                              ones. Read-only over the sources themselves
   zavet spec-paths            Print TAB-separated: slug, path glob (every spec)
   zavet checks                Print TAB-separated: id, label, command (every status)
   zavet spec-checks           Print TAB-separated: slug, label, command
@@ -75,8 +89,9 @@ Usage:
                               calls this, so they cannot drift apart.
                               --emit=git reports the guard_*_git kinds, so a
                               repo running both surfaces never double-counts.
-  zavet audit                 Report stale specs, stale decisions, and guard
-                              pressure as TAB-separated rows (report-only)
+  zavet audit                 Report stale specs, stale decisions, guard
+                              pressure and, for source-backed specs, advisory
+                              drift facts as TAB-separated rows (report-only)
   zavet index                 Regenerate .zavet/INDEX.md, plus the generated
                               agent-context files (see rules / agents-md)
   zavet rules [--check]       Write .grok/rules/zavet.md — the standing rules
@@ -223,18 +238,27 @@ ZAVET_MAX_WIDTH=9
 # can never be mistaken for the number it prefixes.
 ZAVET_MAX_PREFIX=6
 
+# The comment dialect shared by the config and frontmatter parsers, as awk
+# function text to prepend to a program: a value that IS a comment blanks to
+# empty (so defaults apply), a quoted value keeps its `#`, and otherwise an
+# inline ` # comment` is dropped. Same dialect as dira-core::zavet; the dialect
+# corpus pins it. Other strippers differ on purpose (sdlc_yaml_scalar and the
+# BMAD config read YAML/TOML values, spec_sources reads a whitespace list).
+ZAVET_AWK_DECOMMENT='
+function decomment(s) {
+    if (s ~ /^#/) return ""
+    if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
+    return s
+}
+'
+
 # One `key: value` out of .zavet/config, or $3 when the file, the key or the
 # value is absent.
 config_get() { # $1 = root, $2 = key, $3 = fallback
     _cf="$1/$ZAVET_DIR/config"
     _v=""
     if [ -f "$_cf" ]; then
-        _v=$(awk -v k="$2" '
-            function decomment(s) {
-                if (s ~ /^#/) return ""
-                if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
-                return s
-            }
+        _v=$(awk -v k="$2" "$ZAVET_AWK_DECOMMENT"'
             index($0, k ":") == 1 {
                 s = substr($0, length(k) + 2)
                 sub(/^[ \t]*/, "", s)
@@ -248,6 +272,45 @@ config_get() { # $1 = root, $2 = key, $3 = fallback
     fi
     [ -n "$_v" ] || _v=$3
     printf '%s\n' "$_v"
+}
+
+# The kinds of external spec framework zavet can resolve. Anything else on a
+# `spec-source:` line is ignored (and reported by `zavet spec-sources`).
+ZAVET_SPEC_KINDS=" openspec speckit bmad superpowers "
+
+# The `spec-source: <kind> <root> [glob...]` lines of .zavet/config, one flat
+# repeatable line per source, as `kind<TAB>root<TAB>globs` (globs space-joined).
+# With "all" as $2 every line is reported as `status<TAB>kind<TAB>root<TAB>globs`
+# instead, status being ok | unknown-kind | invalid-root | incomplete.
+spec_sources() { # $1 = root, $2 = "all" to report rejected lines too
+    _ss_cf="$1/$ZAVET_DIR/config"
+    [ -f "$_ss_cf" ] || return 0
+    awk -v kinds="$ZAVET_SPEC_KINDS" -v all="${2:-}" '
+        index($0, "spec-source:") != 1 { next }
+        {
+            s = substr($0, 13)
+            sub(/^[ \t]+/, "", s)
+            if (s ~ /^#/) s = ""
+            sub(/[ \t]+#.*$/, "", s)
+            sub(/[ \t\r]+$/, "", s)
+            n = split(s, f, /[ \t]+/)
+            kind = f[1]; root = f[2]
+            globs = ""
+            for (i = 3; i <= n; i++) globs = globs (globs == "" ? "" : " ") f[i]
+            while (root ~ /^\.\//) sub(/^\.\//, "", root)
+            sub(/\/+$/, "", root)
+            st = "ok"
+            if (n < 2 || kind == "" || root == "") st = "incomplete"
+            else if (index(kinds, " " kind " ") == 0) st = "unknown-kind"
+            else if (root == "." || root ~ /[*?[]/ || root ~ /^\// || root ~ /(^|\/)\.\.(\/|$)/ || root == ".zavet" || index(root, ".zavet/") == 1) st = "invalid-root"
+            if (st == "ok") {
+                if ((kind SUBSEP root) in seen) next
+                seen[kind SUBSEP root] = 1
+            }
+            if (all != "") print st "\t" (kind == "" ? "-" : kind) "\t" (root == "" ? "-" : root) "\t" globs
+            else if (st == "ok") print kind "\t" root "\t" globs
+        }
+    ' "$_ss_cf"
 }
 
 # A well-formed prefix. Uppercase only — the filename grammar keys on it (a
@@ -324,7 +387,10 @@ zavet_prefix_alt() { # $1 = root
 zavet_refs_re() { # $1 = root
     printf '(Refs|Supersedes):[[:space:]]*%s' "$(zavet_id_re "$1")"
 }
-ZAVET_SPEC_RE='Spec:[[:space:]]*[a-z0-9][a-z0-9-]*'
+# `Spec:` takes a comma-separated list; each value is a native slug or
+# `<kind>:<id>`. This pattern only says "some Spec: trailer is present" (a
+# cheap prefilter for git --grep); WHICH specs it names is spec_trailer_slugs.
+ZAVET_SPEC_RE='Spec:[[:space:]]*[A-Za-z0-9][A-Za-z0-9:._+-]*'
 
 # A bare id, with no trailer keyword. Kept separate from zavet_refs_re because
 # the two are NOT interchangeable and the failure is silent: composing
@@ -339,8 +405,13 @@ zavet_id_re() { # $1 = root
 # migration-free), so 5 only ever applies where nothing has been minted yet.
 ZAVET_INIT_WIDTH=5
 
+# Write `.zavet/config`. A fresh file gets the commented template; an existing
+# one is rewritten IN PLACE: only the three keys this function owns change, and
+# every other line (comments, `spec-source:` declarations, keys a newer zavet
+# added) survives untouched. Owned keys that are missing are appended.
 write_config() { # $1 = path, $2 = prefix, $3 = aliases, $4 = width
-    cat >"$1" <<EOF
+    if [ ! -f "$1" ]; then
+        cat >"$1" <<EOF
 # Decision id prefix for NEW records. 1-$ZAVET_MAX_PREFIX uppercase chars, leading letter.
 prefix: $2
 # Prefixes retired by \`zavet prefix\` — resolved on read, never minted again.
@@ -350,6 +421,42 @@ prefix-aliases:${3:+ $3}
 # one width never joins a shorthand ref resolved at another.
 id-width: $4
 EOF
+        return 0
+    fi
+    _wc_tmp="$1.tmp.$$"
+    awk -v p="$2" -v a="$3" -v w="$4" -v max="$ZAVET_MAX_PREFIX" '
+        function aliases_line() { return "prefix-aliases:" (a == "" ? "" : " " a) }
+        index($0, "prefix-aliases:") == 1 {
+            if (!sa) { print aliases_line(); sa = 1 }
+            next
+        }
+        index($0, "prefix:") == 1 {
+            if (!sp) { print "prefix: " p; sp = 1 }
+            next
+        }
+        index($0, "id-width:") == 1 {
+            if (!sw) { print "id-width: " w; sw = 1 }
+            next
+        }
+        { print }
+        END {
+            if (!sp) {
+                print "# Decision id prefix for NEW records. 1-" max " uppercase chars, leading letter."
+                print "prefix: " p
+            }
+            if (!sa) print aliases_line()
+            if (!sw) print "id-width: " w
+        }
+    ' "$1" >"$_wc_tmp" || {
+        rm -f "$_wc_tmp"
+        return 1
+    }
+    # cat, not mv: keeps the file's mode, owner and any symlink it sits behind.
+    cat "$_wc_tmp" >"$1" || {
+        rm -f "$_wc_tmp"
+        return 1
+    }
+    rm -f "$_wc_tmp"
 }
 
 # The org this repo belongs to — used only to drop repo tokens that echo it.
@@ -576,14 +683,9 @@ frontmatter() {
     mode=$1
     shift
     [ $# -gt 0 ] || return 0
-    awk -v mode="$mode" '
-        # Inline `# comments` are allowed on structured lines — NEVER on
-        # title, which is free text. Same dialect as dira-core::zavet.
-        function decomment(s) {
-            if (s ~ /^#/) return ""
-            if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
-            return s
-        }
+    # decomment(): inline `# comments` are allowed on structured lines (see
+    # ZAVET_AWK_DECOMMENT) — NEVER on title, which is free text.
+    awk -v mode="$mode" "$ZAVET_AWK_DECOMMENT"'
         # Split a check item on its FIRST "::" into _lbl/_cmd. No separator
         # means the item IS the command and doubles as its own label; only the
         # first separator splits, so a command keeps any later "::".
@@ -772,22 +874,17 @@ decision_frontmatter() { # $1 = root, $2 = mode
 #   spec_frontmatter paths FILE...  -> "slug<TAB>path glob" (one line per glob)
 #   spec_frontmatter checks FILE... -> "slug<TAB>label<TAB>command" (same item
 #       grammar as a decision's — one key, one dialect, two subjects)
+#   spec_frontmatter unit  FILE...  -> meta plus a sixth column, the verified
+#       flag, for `zavet specs --json` (the meta shape itself stays frozen)
 spec_frontmatter() {
     mode=$1
     shift
     [ $# -gt 0 ] || return 0
-    awk -v mode="$mode" '
+    # decomment() allows inline `# comments` on structured lines (origin,
+    # confidence, date, paths) — NEVER on title, which is free text.
+    awk -v mode="$mode" "$ZAVET_AWK_DECOMMENT"'
         function slugof(f,    n, a, s) {
             n = split(f, a, "/"); s = a[n]; sub(/\.md$/, "", s); return s
-        }
-        # Inline `# comments` are allowed on structured lines (origin,
-        # confidence, date, paths) — NEVER on title, which is free text.
-        # Same dialect as dira-core::zavet, including a value that IS a
-        # comment blanking to empty (so defaults apply).
-        function decomment(s) {
-            if (s ~ /^#/) return ""
-            if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
-            return s
         }
         # Identical to the splitter in frontmatter() above: the grammar
         # belongs to the key, not to the record type.
@@ -818,6 +915,7 @@ spec_frontmatter() {
                 if (origin == "") origin = "reverse-engineered"
                 if (conf == "") conf = "low"
                 if (mode == "meta") print slug "\t" origin "\t" conf "\t" date "\t" title
+                else if (mode == "unit") print slug "\t" origin "\t" conf "\t" date "\t" title "\t" verified
                 else if (mode == "checks") {
                     for (i = 1; i <= nc; i++) {
                         splitcheck(checks[i])
@@ -826,7 +924,7 @@ spec_frontmatter() {
                 }
                 else for (i = 1; i <= np; i++) print slug "\t" paths[i]
             }
-            slug = ""; origin = ""; conf = ""; date = ""; title = ""; np = 0; nc = 0
+            slug = ""; origin = ""; conf = ""; date = ""; title = ""; verified = ""; np = 0; nc = 0
             fm = 0; done = 0; closed = 0; inpaths = 0; inchecks = 0
         }
         FNR == 1 {
@@ -859,10 +957,11 @@ spec_frontmatter() {
         }
         inchecks && /^[ \t]+[^ \t]/ { next }
         inchecks { inchecks = 0 }
-        /^title:/      { s = $0; sub(/^title:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); title = s; next }
+        /^title:/      { s = $0; sub(/^title:[ \t]*/, "", s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); gsub(/[\t\r]/, " ", s); title = s; next }
         /^origin:/     { s = $0; sub(/^origin:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); origin = s; next }
         /^confidence:/ { s = $0; sub(/^confidence:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); conf = s; next }
         /^date:/       { s = $0; sub(/^date:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); date = s; next }
+        /^verified:/   { s = $0; sub(/^verified:[ \t]*/, "", s); s = decomment(s); gsub(/^["'\'']|["'\''][ \t]*$/, "", s); verified = s; next }
         /^paths:[ \t]*\[/ {
             s = $0; sub(/^paths:[ \t]*\[/, "", s); sub(/\][ \t]*(#.*)?$/, "", s)
             n = split(s, a, ",")
@@ -932,6 +1031,12 @@ cmd_init() {
     cp "$tpl/decision.md" "$dest/.template.md"
     cp "$tpl/spec.md" "$dest/.spec-template.md"
     printf 'zavet: scaffolded %s\n' "$dest"
+    # Spec frameworks already in the repo are declared now, so the first session
+    # sees their units. Detection is a stat per directory; nothing is read.
+    (cd -- "$top" && cmd_spec_sources --detect --write 2>/dev/null) |
+        while IFS="$(printf '\t')" read -r _kind _src _root; do
+            [ "$_kind" = written ] && printf 'zavet: declared spec source %s %s\n' "$_src" "$_root"
+        done
     printf 'zavet: decision ids are %s — change it now with "zavet prefix <NEW>" if it reads wrong\n' \
         "$(format_id "$prefix" "$ZAVET_INIT_WIDTH" 1)"
     # A prefix a sibling already holds defeats the point of having one. Say so
@@ -1343,24 +1448,56 @@ cmd_match_batch() {
     run_match "$(cmd_guards)"
 }
 
-# Spec files are flat kebab-case <slug>.md; the sh glob never matches the
-# dot-prefixed .spec-template.md, so no explicit template filter is needed.
-cmd_specs() {
+# Native spec files only: flat kebab-case <slug>.md; the sh glob never matches
+# the dot-prefixed .spec-template.md, so no explicit template filter is needed.
+# `zavet index` and the context payload list natives alone (source units come
+# and go with the framework and would churn those committed files).
+cmd_specs_native() {
     root=$(zavet_root)
     set -- "$root/$ZAVET_DIR"/specs/*.md
     [ -e "$1" ] || return 0
     spec_frontmatter meta "$@"
 }
 
+# `zavet specs`: native specs, then the source-backed units declared in
+# `spec-source:` lines. --json emits JSON Lines (see sdlc_emit); --with-text
+# adds requirement/task text, summary and documents, and is the only way any
+# content leaves the repo through this command.
+cmd_specs() {
+    _sp_json=0
+    _sp_text=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --json) _sp_json=1 ;;
+            --with-text) _sp_text=1 ;;
+            *) die "usage: zavet specs [--json [--with-text]]" ;;
+        esac
+        shift
+    done
+    [ "$_sp_text" -eq 0 ] || [ "$_sp_json" -eq 1 ] || die "--with-text needs --json"
+    root=$(zavet_root)
+    if [ "$_sp_json" -eq 1 ]; then
+        sdlc_specs_json "$root" "$_sp_text"
+        return $?
+    fi
+    cmd_specs_native
+    sdlc_source_tsv "$root"
+}
+
 # "slug<TAB>glob" for every spec — the coverage table spec-match runs against.
+# Source-backed units contribute their declared globs and the paths accreted
+# from `Spec:` trailers, never anything derived from their artifacts.
 cmd_spec_paths() {
     root=$(zavet_root)
     set -- "$root/$ZAVET_DIR"/specs/*.md
-    [ -e "$1" ] || return 0
-    spec_frontmatter paths "$@"
+    if [ -e "$1" ]; then
+        spec_frontmatter paths "$@"
+    fi
+    sdlc_source_paths "$root"
 }
 
-# "slug<TAB>label<TAB>command" for every spec.
+# "slug<TAB>label<TAB>command" for every spec. Native only: a source-backed
+# unit has no checks of its own, and zavet never runs a framework's files.
 cmd_spec_checks() {
     root=$(zavet_root)
     set -- "$root/$ZAVET_DIR"/specs/*.md
@@ -1370,6 +1507,1750 @@ cmd_spec_checks() {
 
 cmd_spec_match() {
     run_match "$(cmd_spec_paths)"
+}
+
+# ----------------------------------------------------------- spec sources --
+#
+# Spec units that live in another framework (OpenSpec, Spec Kit, BMAD,
+# superpowers), resolved LIVE and in place. Nothing is copied into
+# .zavet/specs/, and nothing here ever writes into a declared source root.
+#
+# The pipeline has four stages, each a pure function of the one before:
+#
+#   sdlc_manifest   shell     which units exist and which files make them up
+#                             (directory listings only, so it is cheap enough
+#                             for `zavet gate`, which runs on every commit)
+#   sdlc_parse      awk       reads those files, structure only, and emits the
+#                             STREAM: one tagged TSV row per fact
+#   sdlc_emit       awk       joins the stream with git history, blob oids and
+#                             accreted paths, and renders JSON / TSV views
+#
+# STREAM rows (tab separated; tabs and newlines never occur inside a value,
+# line breaks inside text travel as \001):
+#   D root                         a declared source root
+#   U slug kind id root title state nativeState groupKind groupId risk
+#     frameworkVersion closedOn primary origin verified unresolved
+#   F slug path doc                a file of the unit (doc=1: a spec document)
+#   A slug path doc                the same file at its pre-archive location
+#   G slug glob                    a human-declared coverage glob
+#   C slug capability              Q slug id state scenarios capability text
+#   T slug id done story parallel status text
+#   P slug plannedPath             S slug summary        K slug trackerRef
+#
+# Every parser fails to `unresolved: <why>`, never to a guess. Text columns
+# stay empty unless --with-text was asked for, so the default output cannot
+# carry content onto the wire.
+
+# One scalar out of a YAML file. With a parent key the value must sit inside
+# that block (the manifest nests `version:` under `installation:`).
+sdlc_yaml_scalar() { # $1 = file, $2 = key, $3 = optional parent key
+    [ -f "$1" ] && [ ! -L "$1" ] || return 0
+    awk -v k="$2" -v parent="${3:-}" '
+        function val(s) {
+            sub(/^[ \t]+/, "", s)
+            if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
+            sub(/[ \t\r]+$/, "", s)
+            gsub(/^["'\'']|["'\'']$/, "", s)
+            return s
+        }
+        parent == "" && index($0, k ":") == 1 { print val(substr($0, length(k) + 2)); exit }
+        parent != "" && /^[^ \t#]/ { inp = (index($0, parent ":") == 1); next }
+        parent != "" && inp && $0 ~ ("^[ \t]+" k ":") {
+            s = $0; sub(/^[ \t]+[^:]*:/, "", s); print val(s); exit
+        }
+    ' "$1" 2>/dev/null
+}
+
+# One string value out of a JSON file, found by key alone (no nesting rules).
+sdlc_json_scalar() { # $1 = file, $2 = key
+    [ -f "$1" ] && [ ! -L "$1" ] || return 0
+    awk -v k="$2" '
+        {
+            if (match($0, "\"" k "\"[ \t]*:[ \t]*\"[^\"]*\"")) {
+                s = substr($0, RSTART, RLENGTH)
+                sub(/^[^:]*:[ \t]*"/, "", s); sub(/"$/, "", s)
+                print s; exit
+            }
+        }
+    ' "$1" 2>/dev/null
+}
+
+# BMAD keeps its artifacts in `output_folder` (default _bmad-output), set in
+# _bmad/custom/config.toml as "{project-root}/<dir>". Prints the repo-relative
+# dir to read: the declared root when it exists, else the configured one.
+bmad_store() { # $1 = top, $2 = declared root
+    if [ -d "$1/$2" ]; then
+        printf '%s\n' "$2"
+        return 0
+    fi
+    _bs_cfg="$1/_bmad/custom/config.toml"
+    _bs=""
+    if [ -f "$_bs_cfg" ] && [ ! -L "$_bs_cfg" ]; then
+        _bs=$(awk '
+            /^[ \t]*output_folder[ \t]*=/ {
+                s = $0; sub(/^[^=]*=[ \t]*/, "", s)
+                sub(/[ \t]+#.*$/, "", s); gsub(/["'\'']/, "", s); sub(/[ \t\r]+$/, "", s)
+                sub(/^\{project-root\}\/?/, "", s); sub(/^\.\//, "", s); sub(/\/+$/, "", s)
+                print s; exit
+            }
+        ' "$_bs_cfg")
+    fi
+    case "$_bs" in
+        '' | /* | *..*) _bs="" ;;
+    esac
+    if [ -n "$_bs" ] && [ -d "$1/$_bs" ]; then
+        printf '%s\n' "$_bs"
+        return 0
+    fi
+    printf '%s\n' "$2"
+}
+
+# -- manifest: which units exist -------------------------------------------
+
+# Last path component of a glob-matched directory ("a/b/" -> b), into DIRBASE.
+dirbase() { # $1 = path
+    DIRBASE=${1%/}
+    DIRBASE=${DIRBASE##*/}
+}
+
+sdlc_u() { # slug kind id srcroot variant closedOn groupKind groupId fw
+    printf 'U\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"
+}
+sdlc_f() { printf 'F\t%s\t%s\t%s\n' "$1" "$2" "$3"; } # slug role path
+sdlc_a() { printf 'A\t%s\t%s\t%s\n' "$1" "$2" "$3"; } # slug role alias-path
+
+sdlc_manifest_openspec_unit() { # top srcroot reldir id variant closedOn fw aliasreldir
+    _ou_dir="$1/$2/$3"
+    _ou_slug="openspec:$4"
+    sdlc_u "$_ou_slug" openspec "$4" "$2" "$5" "$6" "" "" "$7"
+    for _ou_f in proposal design tasks; do
+        [ -f "$_ou_dir/$_ou_f.md" ] || continue
+        sdlc_f "$_ou_slug" "$_ou_f" "$2/$3/$_ou_f.md"
+        [ -z "$8" ] || sdlc_a "$_ou_slug" "$_ou_f" "$2/$8/$_ou_f.md"
+    done
+    for _ou_s in "$_ou_dir"/specs/*/spec.md; do
+        [ -f "$_ou_s" ] || continue
+        _ou_cap=${_ou_s%/spec.md}
+        _ou_cap=${_ou_cap##*/}
+        sdlc_f "$_ou_slug" delta "$2/$3/specs/$_ou_cap/spec.md"
+        [ -z "$8" ] || sdlc_a "$_ou_slug" delta "$2/$8/specs/$_ou_cap/spec.md"
+    done
+}
+
+sdlc_manifest_openspec() { # $1 = top, $2 = srcroot
+    _om_fw=$(sdlc_yaml_scalar "$1/$2/config.yaml" version)
+    for _om_d in "$1/$2"/changes/*/; do
+        [ -d "$_om_d" ] || continue
+        dirbase "$_om_d"
+        _om_n=$DIRBASE
+        [ "$_om_n" = archive ] && continue
+        sdlc_manifest_openspec_unit "$1" "$2" "changes/$_om_n" "$_om_n" change "" "$_om_fw" ""
+    done
+    for _om_d in "$1/$2"/changes/archive/*/; do
+        [ -d "$_om_d" ] || continue
+        dirbase "$_om_d"
+        _om_n=$DIRBASE
+        _om_id=$_om_n
+        _om_date=""
+        case "$_om_n" in
+            [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-?*)
+                _om_rest=${_om_n#??????????}
+                _om_date=${_om_n%"$_om_rest"}
+                _om_id=${_om_rest#-}
+                ;;
+        esac
+        sdlc_manifest_openspec_unit "$1" "$2" "changes/archive/$_om_n" "$_om_id" archive "$_om_date" "$_om_fw" "changes/$_om_id"
+    done
+}
+
+sdlc_manifest_speckit() { # $1 = top, $2 = srcroot
+    # The version stamp sits in the project's .specify/, next to the root or
+    # at the repo top.
+    _sm_fw=""
+    for _sm_sd in "$1/${2%/*}/.specify" "$1/.specify"; do
+        [ -d "$_sm_sd" ] || continue
+        _sm_fw=$(sdlc_json_scalar "$_sm_sd/init-options.json" speckit_version)
+        [ -n "$_sm_fw" ] || _sm_fw=$(sdlc_json_scalar "$_sm_sd/init-options.json" version)
+        [ -z "$_sm_fw" ] || break
+    done
+    for _sm_d in "$1/$2"/*/; do
+        [ -d "$_sm_d" ] || continue
+        dirbase "$_sm_d"
+        _sm_n=$DIRBASE
+        # NNN-slug or YYYYMMDD-HHMMSS-slug: a run of 3+ digits, then a dash.
+        _sm_digits=${_sm_n%%[!0-9]*}
+        [ "${#_sm_digits}" -ge 3 ] || continue
+        _sm_rest=${_sm_n#"$_sm_digits"}
+        case "$_sm_rest" in
+            -?*) ;;
+            *) continue ;;
+        esac
+        _sm_gid=$_sm_digits
+        case "$_sm_rest" in
+            -[0-9][0-9][0-9][0-9][0-9][0-9]-?*) _sm_gid="$_sm_digits-${_sm_rest#-}"; _sm_gid=${_sm_gid%"${_sm_gid#????????-??????}"} ;;
+        esac
+        _sm_slug="speckit:$_sm_n"
+        sdlc_u "$_sm_slug" speckit "$_sm_n" "$2" feature "" feature "$_sm_gid" "$_sm_fw"
+        for _sm_f in spec plan tasks research data-model quickstart; do
+            [ -f "$_sm_d$_sm_f.md" ] || continue
+            _sm_role=other
+            case "$_sm_f" in spec | plan | tasks | research) _sm_role=$_sm_f ;; esac
+            sdlc_f "$_sm_slug" "$_sm_role" "$2/$_sm_n/$_sm_f.md"
+        done
+        for _sm_c in "$_sm_d"contracts/*; do
+            [ -f "$_sm_c" ] || continue
+            sdlc_f "$_sm_slug" other "$2/$_sm_n/contracts/${_sm_c##*/}"
+        done
+    done
+}
+
+sdlc_manifest_bmad() { # $1 = top, $2 = effective store (repo-relative)
+    _bm_fw=$(sdlc_yaml_scalar "$1/_bmad/_config/manifest.yaml" version installation)
+    [ -n "$_bm_fw" ] || _bm_fw=$(sdlc_yaml_scalar "$1/_bmad/custom/config.toml" version)
+    # v6.12 ticket tree: <store>/initiative-*/epic-*/epic-*.md. The unit is
+    # the epic; the initiative is its group.
+    for _bm_i in "$1/$2"/initiative-*/; do
+        [ -d "$_bm_i" ] || continue
+        dirbase "$_bm_i"
+        _bm_in=$DIRBASE
+        for _bm_e in "$_bm_i"epic-*/; do
+            [ -d "$_bm_e" ] || continue
+            dirbase "$_bm_e"
+            _bm_en=$DIRBASE
+            _bm_slug="bmad:$_bm_en"
+            _bm_rel="$2/$_bm_in/$_bm_en"
+            sdlc_u "$_bm_slug" bmad "$_bm_en" "$2" epic "" initiative "$_bm_in" "$_bm_fw"
+            [ -f "$_bm_e$_bm_en.md" ] && sdlc_f "$_bm_slug" epic "$_bm_rel/$_bm_en.md"
+            [ -f "$_bm_e/tickets.toml" ] && sdlc_f "$_bm_slug" tickets "$_bm_rel/tickets.toml"
+            for _bm_s in "$_bm_e"story-*.md; do
+                [ -f "$_bm_s" ] || continue
+                case "${_bm_s##*/}" in
+                    story-*-plan.md) sdlc_f "$_bm_slug" storyplan "$_bm_rel/${_bm_s##*/}" ;;
+                    *) sdlc_f "$_bm_slug" story "$_bm_rel/${_bm_s##*/}" ;;
+                esac
+            done
+        done
+    done
+    # Legacy v6: sprint-status.yaml with epic-N keys under development_status.
+    _bm_ss="$2/implementation-artifacts/sprint-status.yaml"
+    if [ -f "$1/$_bm_ss" ] && [ ! -L "$1/$_bm_ss" ]; then
+        awk '
+            /^development_status:/ { on = 1; next }
+            /^[^ \t#]/ { on = 0 }
+            on && $0 ~ /^[ \t]+epic-[0-9]+:/ {
+                k = $0; sub(/^[ \t]+/, "", k); sub(/:.*$/, "", k); print k
+            }
+        ' "$1/$_bm_ss" | while IFS= read -r _bm_k; do
+            sdlc_u "bmad:$_bm_k" bmad "$_bm_k" "$2" legacy "" "" "" "$_bm_fw"
+            sdlc_f "bmad:$_bm_k" sprint "$_bm_ss"
+        done
+    fi
+}
+
+# One `plan<TAB>design` row per plan under <srcroot>/plans, from ONE awk over
+# all of them: the plan's repo-relative path, and the design file its
+# `**Spec:**` header line (first 40 lines) names, empty when it names none. A
+# plan pairs with a design ONLY through that line. Symlinked plans are skipped
+# (an unreadable one is listed unpaired, as it names no design).
+sdlc_plan_pairs() { # $1 = top, $2 = srcroot
+    _pp_root=$2
+    _pp_dir="$1/$2/plans"
+    set --
+    for _pp_p in "$_pp_dir"/*.md; do
+        if [ ! -f "$_pp_p" ] || [ -L "$_pp_p" ]; then continue; fi
+        if [ -r "$_pp_p" ]; then
+            set -- "$@" "$_pp_p"
+        else
+            printf '%s/plans/%s\t\n' "$_pp_root" "${_pp_p##*/}"
+        fi
+    done
+    [ $# -gt 0 ] || return 0
+    # ARGV is walked in END so an empty plan (no records, no FNR == 1) is
+    # still listed, in glob order.
+    awk -v root="$_pp_root" '
+        BEGIN { for (i = 1; i < ARGC; i++) d[ARGV[i]] = "" }
+        FNR <= 40 && !(FILENAME in got) && /\*\*Spec:\*\*/ {
+            got[FILENAME] = 1
+            if (match($0, /specs\/[A-Za-z0-9._-]+\.md/)) d[FILENAME] = substr($0, RSTART + 6, RLENGTH - 6)
+        }
+        END {
+            for (i = 1; i < ARGC; i++) {
+                b = ARGV[i]; sub(/^.*\//, "", b)
+                print root "/plans/" b "\t" d[ARGV[i]]
+            }
+        }
+    ' "$@"
+}
+
+sdlc_manifest_superpowers() { # $1 = top, $2 = srcroot
+    _sp_tab=$(printf '\t')
+    _sp_pairs=$(sdlc_plan_pairs "$1" "$2")
+    for _sp_d in "$1/$2"/specs/*.md; do
+        [ -f "$_sp_d" ] || continue
+        _sp_n=${_sp_d##*/}
+        _sp_base=${_sp_n%.md}
+        _sp_id=${_sp_base%-design}
+        _sp_slug="superpowers:$_sp_id"
+        sdlc_u "$_sp_slug" superpowers "$_sp_id" "$2" design "" "" "" ""
+        sdlc_f "$_sp_slug" design "$2/specs/$_sp_n"
+        [ -n "$_sp_pairs" ] || continue
+        while IFS="$_sp_tab" read -r _sp_pl _sp_pd; do
+            if [ "$_sp_pd" = "$_sp_n" ]; then
+                printf 'F\t%s\tsplan\t%s\n' "$_sp_slug" "$_sp_pl"
+            fi
+        done <<EOF
+$_sp_pairs
+EOF
+    done
+}
+
+# Plans whose header names no design that exists. Reported, never resolved.
+sdlc_unpaired_plans() { # $1 = top, $2 = srcroot
+    _up_tab=$(printf '\t')
+    sdlc_plan_pairs "$1" "$2" | while IFS="$_up_tab" read -r _up_pl _up_pd; do
+        if [ -z "$_up_pd" ] || [ ! -f "$1/$2/specs/$_up_pd" ]; then
+            printf '%s\n' "$_up_pl"
+        fi
+    done
+}
+
+# Per-kind hooks outside the manifest adapters, so callers never name a kind.
+# Both only dispatch for a kind in ZAVET_SPEC_KINDS.
+#
+# sdlc_root: the repo-relative directory to read for a declared root (BMAD's
+# `output_folder` can move it); every other kind reads the root as declared.
+sdlc_root() { # $1 = kind, $2 = top, $3 = declared root
+    case "$ZAVET_SPEC_KINDS" in
+        *" $1 "*) ;;
+        *)
+            printf '%s\n' "$3"
+            return 0
+            ;;
+    esac
+    case "$1" in
+        bmad) bmad_store "$2" "$3" ;;
+        *) printf '%s\n' "$3" ;;
+    esac
+}
+
+# sdlc_report: the extra `spec-sources` report rows a kind owns (superpowers:
+# plans that name no design; Spec Kit: the constitution, reported next to
+# RULES.md and never imported). $3 is the effective root, unused by speckit.
+sdlc_report() { # $1 = kind, $2 = top, $3 = effective root
+    case "$ZAVET_SPEC_KINDS" in
+        *" $1 "*) ;;
+        *) return 0 ;;
+    esac
+    case "$1" in
+        superpowers) sdlc_unpaired_plans "$2" "$3" | sed 's/^/unpaired-plan\t/' ;;
+        speckit)
+            if [ -f "$2/.specify/memory/constitution.md" ]; then
+                printf 'constitution\t.specify/memory/constitution.md\treported next to %s/RULES.md, never imported\n' "$ZAVET_DIR"
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# Every unit of every declared source, as manifest rows. Cheap: directory
+# listings plus one header scan per plan. Empty when no source is declared.
+sdlc_manifest_rows() { # $1 = top
+    _sx_top=$1
+    _sx_src=$(spec_sources "$_sx_top")
+    [ -n "$_sx_src" ] || return 0
+    _sx_tab=$(printf '\t')
+    while IFS="$_sx_tab" read -r _sx_kind _sx_root _sx_globs; do
+        [ -n "$_sx_kind" ] || continue
+        _sx_root=$(sdlc_root "$_sx_kind" "$_sx_top" "$_sx_root")
+        [ -d "$_sx_top/$_sx_root" ] || continue
+        sdlc_inside "$_sx_top" "$_sx_root" || continue
+        printf 'S\t%s\t%s\t%s\n' "$_sx_kind" "$_sx_root" "$_sx_globs"
+        case "$_sx_kind" in
+            openspec) sdlc_manifest_openspec "$_sx_top" "$_sx_root" ;;
+            speckit) sdlc_manifest_speckit "$_sx_top" "$_sx_root" ;;
+            bmad) sdlc_manifest_bmad "$_sx_top" "$_sx_root" ;;
+            superpowers) sdlc_manifest_superpowers "$_sx_top" "$_sx_root" ;;
+        esac
+    done <<EOF
+$_sx_src
+EOF
+}
+
+# True when the real location of repo-relative directory $2 (symlinks
+# resolved) is inside the repo at $1. $3 = the repo's already-resolved real
+# path, when the caller has it (saves a fork per call).
+sdlc_inside() { # $1 = top, $2 = relative dir, $3 = optional resolved top
+    _in_top=${3:-}
+    if [ -z "$_in_top" ]; then
+        _in_top=$(cd -P -- "$1" 2>/dev/null && pwd -P) || return 1
+    fi
+    _in_dir=$(cd -P -- "$1/$2" 2>/dev/null && pwd -P) || return 1
+    case "$_in_dir/" in
+        "$_in_top"/*) return 0 ;;
+    esac
+    return 1
+}
+
+# Source roots are read-only AND untrusted: a framework folder is checked in
+# by whoever wrote it, so a symlink in it must never make zavet read (and
+# `specs --json --with-text` ship) a file outside the repo. Every file row is
+# vetted here, once, and later stages (parse, oids, emit) only ever see rows
+# that passed: a symlink is skipped, and so is a file whose directory resolves
+# outside the repo. Alias rows (A) are historical paths, never opened.
+#
+# This sits on the gate's hot path, so it forks as little as it can: one
+# `find -type l` per source root. A root with no symlink in it (the normal
+# case; the root itself already resolved inside the repo) needs no per-file or
+# per-directory check at all. Otherwise a file is still tested for being a
+# link, and only a directory at or below a link (or any directory, when a
+# listed link does not look like it is under the root) is resolved.
+sdlc_manifest_safe() { # $1 = top; stdin = manifest rows
+    _ms_tab=$(printf '\t')
+    _ms_real=$(cd -P -- "$1" 2>/dev/null && pwd -P) || _ms_real=""
+    _ms_clean=0
+    _ms_root=""
+    _ms_links=""
+    _ms_dir="<none>"
+    _ms_ok=0
+    while IFS= read -r _ms_line; do
+        case "$_ms_line" in
+            S"$_ms_tab"*)
+                _ms_root=${_ms_line#*"$_ms_tab"}
+                _ms_root=${_ms_root#*"$_ms_tab"}
+                _ms_root=${_ms_root%%"$_ms_tab"*}
+                _ms_links=$(find "$1/$_ms_root" -type l 2>/dev/null)
+                _ms_clean=0
+                if [ -z "$_ms_links" ] && [ -n "$_ms_real" ]; then _ms_clean=1; fi
+                _ms_dir="<none>"
+                ;;
+            F"$_ms_tab"*)
+                if [ "$_ms_clean" -eq 0 ]; then
+                    _ms_path=${_ms_line##*"$_ms_tab"}
+                    [ ! -L "$1/$_ms_path" ] || continue
+                    _ms_d=${_ms_path%/*}
+                    if [ "$_ms_d" != "$_ms_dir" ]; then
+                        _ms_dir=$_ms_d
+                        _ms_ok=1
+                        if sdlc_under_link "$1" "$_ms_root" "$_ms_d" "$_ms_links"; then
+                            _ms_ok=0
+                            if [ -n "$_ms_real" ] && sdlc_inside "$1" "$_ms_d" "$_ms_real"; then _ms_ok=1; fi
+                        fi
+                    fi
+                    [ "$_ms_ok" -eq 1 ] || continue
+                fi
+                ;;
+        esac
+        printf '%s\n' "$_ms_line"
+    done
+}
+
+# True when repo-relative directory $3 sits at or below one of the symlinks in
+# $4 (find's output for source root $2 under $1), or a listed path does not
+# even start with the root (a name holding a newline): then it must be
+# resolved.
+sdlc_under_link() { # $1 = top, $2 = root, $3 = dir, $4 = find output
+    while IFS= read -r _ul_l; do
+        _ul_l=${_ul_l#"$1"/}
+        case "$_ul_l" in
+            "$2"/* | "$2") ;;
+            *) return 0 ;;
+        esac
+        case "$3/" in
+            "$_ul_l"/*) return 0 ;;
+        esac
+    done <<EOF
+$4
+EOF
+    return 1
+}
+
+sdlc_manifest() { # $1 = top
+    sdlc_manifest_rows "$1" | sdlc_manifest_safe "$1"
+}
+
+# The one enumerator: every spec unit as `slug<TAB>kind`, native files first,
+# then source-backed units. Native-only consumers (renumber, the style flags)
+# keep using each_spec on purpose: those must never see a source row.
+each_unit() { # $1 = root, $2 = "native" | "source" (default: both)
+    if [ "${2:-}" != source ]; then
+        for _eu in "$1/$ZAVET_DIR"/specs/*.md; do
+            [ -e "$_eu" ] || continue
+            _eun=${_eu##*/}
+            printf '%s\tzavet\n' "${_eun%.md}"
+        done
+    fi
+    [ "${2:-}" = native ] && return 0
+    sdlc_manifest "$1" | awk -F '\t' '$1 == "U" { print $2 "\t" $3 }'
+}
+
+# Drop the units that can never be shown (stdin = manifest): an archive-variant
+# unit parses to `archived` or `unresolved`, both hidden by the views that call
+# this, so its files are never read. A slug already seen is dropped too, so a
+# later live unit cannot slip past an earlier archived twin (sdlc_parse keeps
+# the first of a slug).
+sdlc_live_units() {
+    awk -F '\t' '
+        $1 == "U" { drop = ($6 == "archive") || ($2 in seen); seen[$2] = 1 }
+        ($1 == "U" || $1 == "F" || $1 == "A") && drop { next }
+        { print }
+    '
+}
+
+# The parsed stream of every source unit (parse = 1). $3 = "live" leaves out
+# archive-variant units before they are parsed.
+sdlc_stream() { # $1 = top, $2 = text (0|1), $3 = optional "live"
+    if [ "${3:-}" = live ]; then
+        sdlc_manifest "$1" | sdlc_live_units | (cd -- "$1" && sdlc_parse 1 "$2")
+    else
+        sdlc_manifest "$1" | (cd -- "$1" && sdlc_parse 1 "$2")
+    fi
+}
+
+# -- parse: unit files -> stream -------------------------------------------
+
+sdlc_parse() { # $1 = parse (0|1), $2 = text (0|1); stdin = manifest; cwd = top
+    awk -v parse="$1" -v text="$2" '
+    BEGIN {
+        FS = "\t"
+        SOH = sprintf("%c", 1); CR = sprintf("%c", 13)
+        DQ = sprintf("%c", 34); BT = sprintf("%c", 96)
+        nu = 0
+    }
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function clean(s) { gsub(CR, "", s); gsub(/\t/, " ", s); return trim(s) }
+    function unq(s) {
+        sub(/^[ \t]+/, "", s)
+        if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
+        sub(/[ \t]+$/, "", s)
+        gsub(/^["'\'']|["'\'']$/, "", s)
+        return s
+    }
+    # Read a file into L[1..n]. inf[i] marks lines inside a code fence or an
+    # HTML comment, which structure matching must not see.
+    function readfile(path,   n, line, fence, cmt) {
+        n = 0; fence = 0; cmt = 0
+        while ((getline line < path) > 0) {
+            sub(/\r$/, "", line)
+            n++; L[n] = line; inf[n] = 0
+            if (line ~ /^[ \t]*(```|~~~)/) { fence = !fence; inf[n] = 1; continue }
+            if (fence) { inf[n] = 1; continue }
+            if (cmt) { inf[n] = 1; if (line ~ /-->/) cmt = 0; continue }
+            if (line ~ /<!--/) {
+                if (line !~ /-->/) cmt = 1
+                inf[n] = 1
+            }
+        }
+        close(path)
+        return n
+    }
+    function fmget(n, key,   i) {
+        if (n < 1 || L[1] != "---") return ""
+        for (i = 2; i <= n; i++) {
+            if (L[i] ~ /^---[ \t]*$/) break
+            if (index(L[i], key ":") == 1) return unq(substr(L[i], length(key) + 2))
+        }
+        return ""
+    }
+    function h1(n,   i, t) {
+        for (i = 1; i <= n; i++) {
+            if (inf[i]) continue
+            if (L[i] ~ /^#[ \t]+/) { t = L[i]; sub(/^#[ \t]+/, "", t); return clean(t) }
+        }
+        return ""
+    }
+    # Text of the first "## <name>" section (names: lowercase, |-separated).
+    function sec(n, names,   i, on, out, h) {
+        on = 0; out = ""
+        for (i = 1; i <= n; i++) {
+            if (inf[i]) { if (on) out = out L[i] SOH; continue }
+            if (L[i] ~ /^##[ \t]+/) {
+                if (on) break
+                h = tolower(L[i]); sub(/^##[ \t]+/, "", h); sub(/[ \t]+$/, "", h)
+                if (index("|" names "|", "|" h "|") > 0) on = 1
+                continue
+            }
+            if (on) out = out L[i] SOH
+        }
+        gsub("^(" SOH ")+", "", out); gsub("(" SOH ")+$", "", out)
+        return out
+    }
+    # "- [ ] rest" / "- [x] rest": sets CBX (done) and CBREST.
+    function cb(line,   t) {
+        if (line !~ /^[ \t]*[-*+][ \t]+\[[ xX]\]([ \t]|$)/) return 0
+        t = line
+        sub(/^[ \t]*[-*+][ \t]+\[/, "", t)
+        CBX = (substr(t, 1, 1) != " ")
+        CBREST = substr(t, 4)
+        sub(/^[ \t]+/, "", CBREST)
+        return 1
+    }
+    function addreq(id, st, scen, cap, txt) {
+        if (st == "open") nopen++
+        buf = buf "Q\t" cur "\t" id "\t" st "\t" scen "\t" cap "\t" (text ? clean(txt) : "") "\n"
+    }
+    function addtask(id, done, story, par, stat, txt) {
+        ntask++
+        if (done) ndone++
+        buf = buf "T\t" cur "\t" id "\t" (done ? 1 : 0) "\t" story "\t" (par ? 1 : 0) "\t" stat "\t" (text ? clean(txt) : "") "\n"
+    }
+    function addplan(p) {
+        sub(/^\.\//, "", p); sub(/\/+$/, "", p)
+        if (p == "" || ((cur SUBSEP p) in plseen)) return
+        plseen[cur SUBSEP p] = 1
+        buf = buf "P\t" cur "\t" p "\n"
+    }
+    function addcap(c) {
+        if (c == "" || ((cur SUBSEP c) in capseen)) return
+        capseen[cur SUBSEP c] = 1
+        buf = buf "C\t" cur "\t" c "\n"
+    }
+    function stripmd(s) { gsub(/\*\*/, "", s); gsub(BT, "", s); return trim(s) }
+
+    # -- OpenSpec ---------------------------------------------------------
+    function rq_flush() {
+        if (!rq_on) return
+        addreq("R" rq_ord, rq_state, rq_scen, rq_cap, rq_name)
+        rq_on = 0
+    }
+    function rq_start(st, name) {
+        rq_flush()
+        rq_ord++; rq_on = 1; rq_state = st; rq_scen = 0; rq_name = name; rq_cap = rq_capcur
+    }
+    function p_delta(n, cap,   i, sect, line, h, t) {
+        sect = ""; rq_ord = 0; rq_on = 0; rq_capcur = cap
+        for (i = 1; i <= n; i++) {
+            if (inf[i]) continue
+            line = L[i]
+            if (line ~ /^##[ \t]+/ && line !~ /^###/) {
+                rq_flush()
+                h = line; sub(/^##[ \t]+/, "", h)
+                if (h ~ /^ADDED[ \t]+Requirements/) sect = "added"
+                else if (h ~ /^MODIFIED[ \t]+Requirements/) sect = "modified"
+                else if (h ~ /^REMOVED[ \t]+Requirements/) sect = "removed"
+                else if (h ~ /^RENAMED[ \t]+Requirements/) sect = "renamed"
+                else sect = ""
+                continue
+            }
+            if (sect == "") continue
+            if (line ~ /^###[ \t]+Requirement:/) {
+                t = line; sub(/^###[ \t]+Requirement:[ \t]*/, "", t)
+                rq_start(sect, clean(t))
+            } else if (line ~ /^####[ \t]+Scenario:/) {
+                if (rq_on) rq_scen++
+            } else if (sect == "renamed" && line ~ /^[ \t]*[-*][ \t]*FROM:/) {
+                t = line; sub(/^[ \t]*[-*][ \t]*FROM:[ \t]*/, "", t)
+                sub(/^`?#+[ \t]*Requirement:[ \t]*/, "", t); gsub(BT, "", t)
+                rq_start("renamed", clean(t))
+            } else if (sect == "renamed" && line ~ /^[ \t]*[-*][ \t]*TO:/) {
+                t = line; sub(/^[ \t]*[-*][ \t]*TO:[ \t]*/, "", t)
+                sub(/^`?#+[ \t]*Requirement:[ \t]*/, "", t); gsub(BT, "", t)
+                if (rq_on) rq_name = rq_name " -> " clean(t)
+            }
+        }
+        rq_flush()
+    }
+    function p_openspec(u,   i, role, f, n, cap, t, seq, tok) {
+        hasprop = 0; seq = 0
+        for (i = 1; i <= nf[u]; i++) {
+            role = frole[u, i]; f = fpath[u, i]
+            if (role == "proposal") {
+                hasprop = 1; primary = f
+                n = readfile(f); title = h1(n); sub(/^Change:[ \t]*/, "", title)
+                if (text) summ = sec(n, "why")
+            } else if (role == "tasks") {
+                n = readfile(f)
+                for (t = 1; t <= n; t++) {
+                    if (inf[t] || !cb(L[t])) continue
+                    seq++
+                    tok = CBREST; sub(/[ \t].*$/, "", tok)
+                    if (tok ~ /^[0-9]+(\.[0-9]+)*\.?$/) { sub(/\.$/, "", tok); id = tok; txt = CBREST; sub(/^[^ \t]+[ \t]*/, "", txt) }
+                    else { id = seq ""; txt = CBREST }
+                    addtask(id, CBX, "", 0, "", txt)
+                }
+            } else if (role == "delta") {
+                cap = f; sub(/\/spec\.md$/, "", cap); sub(/^.*\//, "", cap)
+                addcap(cap)
+                n = readfile(f); p_delta(n, cap)
+            }
+        }
+        if (!hasprop) { unres = "proposal.md missing"; return }
+        if (uvar[u] == "archive") { state = "archived"; nat = "archive" }
+        else { state = "active"; nat = "changes" }
+    }
+
+    # -- Spec Kit ---------------------------------------------------------
+    # Path-looking tokens in a task description: anything with a slash, or
+    # the last token when it ends in a file extension.
+    function pathsof(desc,   n, w, i, t, last) {
+        n = split(desc, w, /[ \t]+/)
+        for (i = 1; i <= n; i++) {
+            t = w[i]
+            gsub("^[(" BT DQ "]+", "", t); gsub("[)" BT DQ ".,;:]+$", "", t)
+            if (t == "" || t ~ /:\/\// || t ~ /^\// || t !~ /^[A-Za-z0-9_.@\/()-]+$/) continue
+            if (index(t, "/") > 0) { addplan(t); continue }
+            if (i == n && t ~ /[A-Za-z0-9_-]\.[A-Za-z][A-Za-z0-9]*$/ && t !~ /^(e\.g|i\.e)/) addplan(t)
+        }
+    }
+    function p_speckit(u,   i, role, f, n, t, line, w, nw, k, id, par, story, desc, hastasks, stat, tt) {
+        hasspec = 0; hastasks = 0
+        for (i = 1; i <= nf[u]; i++) {
+            role = frole[u, i]; f = fpath[u, i]
+            if (role == "spec") {
+                hasspec = 1; primary = f
+                n = readfile(f); title = h1(n); sub(/^Feature Specification:[ \t]*/, "", title)
+                for (t = 1; t <= n; t++) {
+                    if (inf[t]) continue
+                    line = L[t]
+                    if (line ~ /^\*\*Status\*\*:/ && nat == "") { tt = line; sub(/^\*\*Status\*\*:[ \t]*/, "", tt); nat = clean(tt) }
+                    if (line ~ /^[ \t]*[-*+][ \t]+(\*\*)?FR-[0-9]+(\*\*)?[ \t]*[:.]/ ||
+                        line ~ /^[ \t]*[-*+][ \t]+\*\*FR-[0-9]+\*\*/) {
+                        tt = line; sub(/^[ \t]*[-*+][ \t]+(\*\*)?/, "", tt)
+                        id = tt; sub(/[^A-Za-z0-9-].*$/, "", id)
+                        sub(/^FR-[0-9]+(\*\*)?[ \t]*[:.]?[ \t]*/, "", tt); sub(/^(\*\*)?[ \t]*:?[ \t]*/, "", tt)
+                        addreq(id, (line ~ /\[NEEDS CLARIFICATION/ ? "open" : "declared"), 0, "", tt)
+                    }
+                }
+            } else if (role == "plan") {
+                if (text) { n = readfile(f); psum = sec(n, "summary") }
+            } else if (role == "tasks") {
+                hastasks = 1
+                n = readfile(f)
+                for (t = 1; t <= n; t++) {
+                    if (inf[t] || !cb(L[t])) continue
+                    nw = split(CBREST, w, /[ \t]+/)
+                    id = w[1]
+                    if (id !~ /^T[0-9]+$/) continue
+                    par = 0; story = ""; k = 2
+                    while (k <= nw) {
+                        if (w[k] == "[P]") par = 1
+                        else if (w[k] ~ /^\[US[0-9]+\]$/) { story = substr(w[k], 2, length(w[k]) - 2) }
+                        else break
+                        k++
+                    }
+                    desc = ""
+                    for (; k <= nw; k++) desc = desc (desc == "" ? "" : " ") w[k]
+                    addtask(id, CBX, story, par, "", desc)
+                    pathsof(desc)
+                }
+            }
+        }
+        if (!hasspec) { unres = "spec.md missing"; return }
+        if (!hastasks || ntask == 0) state = "proposed"
+        else if (ndone == ntask) state = "done"
+        else if (ndone > 0) state = "in-progress"
+        else state = "active"
+        if (text && summ == "") summ = psum
+    }
+
+    # -- superpowers ------------------------------------------------------
+    function bt_paths(line,   s, a, b, c) {
+        s = line
+        while ((a = index(s, BT)) > 0) {
+            s = substr(s, a + 1)
+            b = index(s, BT)
+            if (b == 0) break
+            c = substr(s, 1, b - 1)
+            s = substr(s, b + 1)
+            sub(/:[0-9]+(-[0-9]+)?$/, "", c)
+            if (c != "" && c !~ /[ \t]/) addplan(c)
+        }
+    }
+    function p_splan(f, pidx,   n, t, line, taskn, step, infiles, tid, txt, tok, sn) {
+        n = readfile(f); taskn = 0; step = 0; infiles = 0
+        for (t = 1; t <= n; t++) {
+            line = L[t]
+            if (inf[t]) continue
+            if (line ~ /^#+[ \t]+Task[ \t]+[0-9]+/) {
+                tok = line; sub(/^#+[ \t]+Task[ \t]+/, "", tok); sub(/[^0-9].*$/, "", tok)
+                taskn = tok + 0; step = 0; infiles = 0
+                continue
+            }
+            if (line ~ /^\*\*Files:\*\*/) { infiles = 1; bt_paths(line); continue }
+            if (infiles && !cb(line)) {
+                if (line ~ /^[ \t]*[-*][ \t]/) { bt_paths(line); continue }
+                if (trim(line) == "") { infiles = 0; continue }
+                infiles = 0
+            }
+            if (cb(line)) {
+                step++
+                sn = step
+                if (match(CBREST, /Step[ \t]+[0-9]+/)) {
+                    tok = substr(CBREST, RSTART, RLENGTH); sub(/^Step[ \t]+/, "", tok); sn = tok + 0
+                }
+                tid = taskn "." sn
+                if (taskn == 0) tid = step ""
+                if (pidx > 1) tid = "p" pidx ":" tid
+                txt = stripmd(CBREST)
+                addtask(tid, CBX, "", 0, "", txt)
+            }
+        }
+    }
+    function p_superpowers(u,   i, role, f, n, np, t) {
+        np = 0; hasdesign = 0
+        for (i = 1; i <= nf[u]; i++) {
+            role = frole[u, i]; f = fpath[u, i]
+            if (role == "design") {
+                hasdesign = 1; primary = f
+                n = readfile(f); title = h1(n)
+                if (text) summ = sec(n, "summary|overview|goal|context")
+            }
+        }
+        for (i = 1; i <= nf[u]; i++) {
+            if (frole[u, i] == "splan") { np++; p_splan(fpath[u, i], np) }
+        }
+        if (!hasdesign) { unres = "design document missing"; return }
+        if (np == 0) state = "proposed"
+        else if (ntask > 0 && ndone == ntask) state = "done"
+        else state = "in-progress"
+    }
+
+    # -- BMAD -------------------------------------------------------------
+    function bstat(s) {
+        s = tolower(trim(s)); gsub(/_/, "-", s); gsub(/[ \t]+/, "-", s)
+        if (s == "ready-for-dev") return "ready"
+        if (s == "built") return "review"
+        return s
+    }
+    function pstatus(f,   n, i, t) {
+        n = readfile(f)
+        t = fmget(n, "status")
+        if (t != "") return t
+        for (i = 1; i <= n && i <= 40; i++) {
+            if (inf[i]) continue
+            if (L[i] ~ /^status:/) return unq(substr(L[i], 8))
+            if (L[i] ~ /^\*\*Status:\*\*/) { t = L[i]; sub(/^\*\*Status:\*\*[ \t]*/, "", t); return clean(t) }
+        }
+        return ""
+    }
+    function bt_flush() {
+        if (bt_id != "") {
+            st = ""
+            if ((cur SUBSEP bt_id "-plan.md") in spstat) st = bstat(spstat[cur SUBSEP bt_id "-plan.md"])
+            addtask(bt_id, (st == "done"), "", 0, st, bt_title)
+        }
+        bt_id = ""; bt_title = ""
+    }
+    function p_bmad_epic(u,   i, role, f, n, t, line, base, st, tt, id, inreq, trk) {
+        hasepic = 0
+        for (i = 1; i <= nf[u]; i++) {
+            role = frole[u, i]; f = fpath[u, i]
+            if (role == "storyplan") {
+                base = f; sub(/^.*\//, "", base)
+                spstat[cur SUBSEP base] = pstatus(f)
+            }
+        }
+        for (i = 1; i <= nf[u]; i++) {
+            role = frole[u, i]; f = fpath[u, i]
+            if (role == "epic") {
+                hasepic = 1; primary = f
+                n = readfile(f)
+                title = fmget(n, "title"); if (title == "") title = h1(n)
+                nat = fmget(n, "status")
+                risk = tolower(fmget(n, "risk"))
+                if (risk != "low" && risk != "medium" && risk != "high") risk = ""
+                trk = fmget(n, "tracker_id")
+                if (text && trk != "") buf = buf "K\t" cur "\t" clean(trk) "\n"
+                if (text) summ = sec(n, "description")
+                inreq = 0
+                for (t = 1; t <= n; t++) {
+                    if (inf[t]) continue
+                    line = L[t]
+                    if (line ~ /^##[ \t]+/) { inreq = (tolower(trim(substr(line, 3))) == "requirements"); continue }
+                    if (!inreq) continue
+                    if (line !~ /^[ \t]*([-*+]|[0-9]+\.)[ \t]+/) continue
+                    tt = line; sub(/^[ \t]*([-*+]|[0-9]+\.)[ \t]+/, "", tt); sub(/^\*\*/, "", tt)
+                    if (tt !~ /^[RE][0-9]+([^A-Za-z0-9]|$)/) continue
+                    id = tt; sub(/[^A-Za-z0-9].*$/, "", id)
+                    sub(/^[RE][0-9]+/, "", tt); sub(/^[ \t]*(\*\*)?[ \t]*[:.—-]*[ \t]*(\*\*)?[ \t]*/, "", tt)
+                    addreq(id, "declared", 0, "", tt)
+                }
+            }
+        }
+        for (i = 1; i <= nf[u]; i++) {
+            if (frole[u, i] != "tickets") continue
+            n = readfile(fpath[u, i]); bt_id = ""; bt_title = ""
+            for (t = 1; t <= n; t++) {
+                line = L[t]
+                if (line ~ /^[ \t]*\[\[/) { bt_flush(); continue }
+                if (line ~ /^[ \t]*id[ \t]*=/) { tt = line; sub(/^[^=]*=[ \t]*/, "", tt); bt_id = unq(tt) }
+                else if (line ~ /^[ \t]*title[ \t]*=/) { tt = line; sub(/^[^=]*=[ \t]*/, "", tt); bt_title = unq(tt) }
+            }
+            bt_flush()
+        }
+        if (!hasepic) { unres = "epic file missing"; return }
+        if (nat == "in-progress") state = "in-progress"
+        else if (nat == "done") state = "done"
+        else if (nat == "dropped") state = "archived"
+        else if (nat == "") state = "proposed"
+        else state = "active"
+    }
+    function load_sprint(path,   n, i, line, on, k, v) {
+        if (path in sprint_loaded) return
+        sprint_loaded[path] = 1
+        n = readfile(path); on = 0
+        for (i = 1; i <= n; i++) {
+            line = L[i]
+            if (line ~ /^development_status:/) { on = 1; continue }
+            if (line ~ /^[^ \t#]/) on = 0
+            if (!on || line !~ /^[ \t]+[A-Za-z0-9_-]+:/) continue
+            k = line; sub(/^[ \t]+/, "", k); sub(/:.*$/, "", k)
+            v = line; sub(/^[^:]*:[ \t]*/, "", v); v = unq(v)
+            nss++; ssk[nss] = k; ssv[nss] = v
+        }
+    }
+    function p_bmad_legacy(u,   i, num, k, pre, st) {
+        primary = fpath[u, 1]
+        load_sprint(primary)
+        num = uid[u]; sub(/^epic-/, "", num); pre = num "-"
+        nat = ""; found = 0
+        for (i = 1; i <= nss; i++) {
+            k = ssk[i]
+            if (k == uid[u]) { nat = ssv[i]; found = 1 }
+            else if (index(k, pre) == 1 && k ~ /^[0-9]+-[0-9]+-/) {
+                st = bstat(ssv[i])
+                addtask(k, (st == "done"), "", 0, st, "")
+            }
+        }
+        if (!found) { unres = "epic key missing from sprint-status.yaml"; return }
+        title = uid[u]
+        if (nat == "in-progress") state = "in-progress"
+        else if (nat == "done") state = "done"
+        else if (nat == "backlog") state = "proposed"
+        else state = "active"
+    }
+
+    # -- unit emission ----------------------------------------------------
+    function isdoc(role) {
+        return (role == "proposal" || role == "design" || role == "delta" || role == "spec" || \
+                role == "plan" || role == "epic") ? 1 : 0
+    }
+    function process(u,   i, kk, g, ng, gs) {
+        cur = uslug[u]
+        title = ""; state = ""; nat = ""; risk = ""; primary = ""; unres = ""; buf = ""; summ = ""; psum = ""
+        ntask = 0; ndone = 0; nopen = 0
+        if (parse) {
+            kk = ukind[u]
+            if (kk == "openspec") p_openspec(u)
+            else if (kk == "speckit") p_speckit(u)
+            else if (kk == "superpowers") p_superpowers(u)
+            else if (kk == "bmad") {
+                if (uvar[u] == "legacy") p_bmad_legacy(u); else p_bmad_epic(u)
+            }
+        }
+        # The structure-only pass (the gate) reads no files, but the variant
+        # alone already says an OpenSpec change was archived.
+        if (!parse && uvar[u] == "archive") state = "archived"
+        if (unres != "") { state = "unresolved"; nat = ""; risk = ""; buf = ""; primary = "" }
+        if (title == "") title = uid[u]
+        printf "U\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\texternal\tfalse\t%s\n", \
+            cur, ukind[u], uid[u], uroot[u], clean(title), state, clean(nat), ugk[u], ugid[u], risk, ufw[u], uclosed[u], primary, unres
+        if (unres == "") {
+            for (i = 1; i <= nf[u]; i++) printf "F\t%s\t%s\t%d\n", cur, fpath[u, i], isdoc(frole[u, i])
+            for (i = 1; i <= na[u]; i++) printf "A\t%s\t%s\t%d\n", cur, apath[u, i], isdoc(arole[u, i])
+        }
+        gs = gl[ukind[u] SUBSEP uroot[u]]
+        ng = split(gs, g, /[ \t]+/)
+        for (i = 1; i <= ng; i++) if (g[i] != "") printf "G\t%s\t%s\n", cur, g[i]
+        if (text && summ != "" && unres == "") printf "S\t%s\t%s\n", cur, clean(summ)
+        printf "%s", buf
+    }
+
+    $1 == "S" { gl[$2 SUBSEP $3] = $4; if (!($3 in rootseen)) { rootseen[$3] = 1; printf "D\t%s\n", $3 }; next }
+    $1 == "U" {
+        nu++
+        uslug[nu] = $2; ukind[nu] = $3; uid[nu] = $4; uroot[nu] = $5; uvar[nu] = $6
+        uclosed[nu] = $7; ugk[nu] = $8; ugid[nu] = $9; ufw[nu] = $10
+        nf[nu] = 0; na[nu] = 0
+        next
+    }
+    $1 == "F" && nu > 0 { nf[nu]++; frole[nu, nf[nu]] = $3; fpath[nu, nf[nu]] = $4; next }
+    $1 == "A" && nu > 0 { na[nu]++; arole[nu, na[nu]] = $3; apath[nu, na[nu]] = $4; next }
+    END {
+        for (u = 1; u <= nu; u++) {
+            if (uslug[u] in seenu) continue
+            seenu[uslug[u]] = 1
+            process(u)
+        }
+    }
+    '
+}
+
+# -- emit: stream + git facts -> JSON / TSV views ---------------------------
+#
+# Modes (stdin = stream):
+#   json     one JSON object per unit (`zavet specs --json`)
+#   paths    slug<TAB>glob: declared globs verbatim, accreted paths escaped
+#            for `case` matching. Source units only.
+#   audit    advisory drift rows for source units
+#   anchors  slug<TAB>path of every file of each live source unit
+#   tsv      slug<TAB>origin<TAB>confidence<TAB>date<TAB>title (source units)
+#   ctx      slug<TAB>title<TAB>done<TAB>total for units still open
+sdlc_emit() { # $1 mode, $2 text (0|1), $3 hist file, $4 oid file, $5 accretion file
+    awk -v mode="$1" -v text="$2" -v histf="${3:-}" -v oidf="${4:-}" -v accf="${5:-}" '
+    BEGIN {
+        FS = "\t"
+        SOH = sprintf("%c", 1); TAB = sprintf("%c", 9); BS = sprintf("%c", 92); DQ = sprintf("%c", 34)
+        CTL = ""
+        for (i = 1; i <= 31; i++) CTL = CTL sprintf("%c", i)
+        nu = 0; nroots = 0
+        if (histf != "") {
+            while ((getline l < histf) > 0) {
+                split(l, a, "\t")
+                hfs[a[1]] = a[2]; hfc[a[1]] = a[3] + 0; hfa[a[1]] = a[4]
+                hls[a[1]] = a[5]; hlc[a[1]] = a[6] + 0; hla[a[1]] = a[7]
+                # hfc / hlc are log positions: the larger the older
+            }
+            close(histf)
+        }
+        if (oidf != "") {
+            while ((getline l < oidf) > 0) {
+                i = index(l, "\t")
+                if (i > 0) oidof[substr(l, 1, i - 1)] = substr(l, i + 1)
+            }
+            close(oidf)
+        }
+    }
+    function jstr(s,   out, i, c) {
+        out = ""
+        while (match(s, /["\\\001-\037]/)) {
+            i = RSTART; c = substr(s, i, 1)
+            out = out substr(s, 1, i - 1)
+            if (c == DQ) out = out BS DQ
+            else if (c == BS) out = out BS BS
+            else if (c == SOH) out = out BS "n"
+            else if (c == TAB) out = out BS "t"
+            else out = out sprintf("\\u%04x", index(CTL, c))
+            s = substr(s, i + 1)
+        }
+        return DQ out s DQ
+    }
+    function jnull(s) { return (s == "") ? "null" : jstr(s) }
+    function jbool(b) { return b ? "true" : "false" }
+    # a,b joined with a comma, no leading one when a is still empty
+    function join(a, b) { return a (a == "" ? "" : ",") b }
+    # State predicates. A closed unit (archived or removed) no longer claims
+    # live work; a live one is also resolved. The paths view still lists the
+    # paths accreted by a closed unit: its own commits touched them, so they
+    # stay part of its history, while its source-level globs would claim the
+    # whole source for every finished change.
+    function closed(st) { return st == "archived" || st == "removed" }
+    function live(st) { return st != "unresolved" && !closed(st) }
+    function underroot(p,   r) {
+        if (p == ".zavet" || index(p, ".zavet/") == 1) return 1
+        for (r = 1; r <= nroots; r++) if (p == roots[r] || index(p, roots[r] "/") == 1) return 1
+        return 0
+    }
+    function globesc(p,   out, i, c) {
+        out = ""
+        for (i = 1; i <= length(p); i++) {
+            c = substr(p, i, 1)
+            if (c == BS || c == "[" || c == "]" || c == "*" || c == "?") out = out BS
+            out = out c
+        }
+        return out
+    }
+    # The document body only: YAML frontmatter is metadata the row already
+    # carries in structured form, and may hold personal fields (assignee,
+    # reviewer) that must never travel.
+    function readdoc(path,   line, out, n, infm) {
+        out = ""; n = 0; infm = 0
+        while ((getline line < path) > 0) {
+            sub(/\r$/, "", line); n++
+            if (n == 1 && line ~ /^---[ \t]*$/) { infm = 1; continue }
+            if (infm) { if (line ~ /^---[ \t]*$/) infm = 0; continue }
+            out = out line SOH
+        }
+        close(path)
+        sub("(" SOH ")+$", "", out)
+        return out
+    }
+    $1 == "D" { roots[++nroots] = $2; next }
+    $1 == "U" {
+        u = ++nu
+        slug[u] = $2; kind[u] = $3; id[u] = $4; root[u] = $5; title[u] = $6; state[u] = $7
+        nat[u] = $8; gk[u] = $9; gid[u] = $10; risk[u] = $11; fw[u] = $12; closedon[u] = $13
+        primary[u] = $14; origin[u] = $15; verified[u] = $16; unres[u] = $17
+        uidx[$2] = u
+        next
+    }
+    $1 == "F" { k = ++nf[u]; fp[u, k] = $3; isunit[$2 SUBSEP $3] = 1; if ($4 == 1) isdocp[$2 SUBSEP $3] = 1; next }
+    $1 == "A" { k = ++na[u]; ap[u, k] = $3; isunit[$2 SUBSEP $3] = 1; if ($4 == 1) isdocp[$2 SUBSEP $3] = 1; next }
+    $1 == "G" { k = ++ng[u]; gg[u, k] = $3; next }
+    $1 == "C" { k = ++ncap[u]; capv[u, k] = $3; next }
+    $1 == "Q" { k = ++nq[u]; qid[u, k] = $3; qst[u, k] = $4; qsc[u, k] = $5; qcap[u, k] = $6; qtx[u, k] = $7; next }
+    $1 == "T" {
+        k = ++nt[u]; tid[u, k] = $3; tdone[u, k] = $4; tstory[u, k] = $5; tpar[u, k] = $6; tst[u, k] = $7; ttx[u, k] = $8
+        if ($4 == 1) tdn[u]++
+        next
+    }
+    $1 == "P" { k = ++npl[u]; plv[u, k] = $3; next }
+    $1 == "S" { summ[u] = $3; next }
+    $1 == "K" { k = ++ntr[u]; trv[u, k] = $3; next }
+
+    function loadacc(   l, a, sl, sha, p, u2, c, r, n) {
+        if (accf == "") return
+        while ((getline l < accf) > 0) {
+            split(l, a, "\t"); sl = a[1]; sha = a[2]; p = a[3]
+            if (!(sl in uidx)) continue
+            u2 = uidx[sl]
+            if (mode == "paths") {
+                # The coverage table only needs the distinct touched paths.
+                if ((sl SUBSEP p) in isunit || underroot(p)) continue
+                if (!((u2 SUBSEP p) in tpseen)) { tpseen[u2 SUBSEP p] = 1; n = ++ntp[u2]; tpv[u2, n] = p }
+                continue
+            }
+            if (!((u2 SUBSEP sha) in cseen)) { cseen[u2 SUBSEP sha] = 1; n = ++ncm[u2]; cmv[u2, n] = sha }
+            if ((sl SUBSEP p) in isunit) { if ((sl SUBSEP p) in isdocp) docT[u2 SUBSEP sha] = 1; continue }
+            if (underroot(p)) continue
+            implT[u2 SUBSEP sha] = 1
+            if (!((u2 SUBSEP p) in tpseen)) { tpseen[u2 SUBSEP p] = 1; n = ++ntp[u2]; tpv[u2, n] = p }
+        }
+        close(accf)
+    }
+    function planned(u2, p,   i) {
+        for (i = 1; i <= npl[u2]; i++) {
+            if (plv[u2, i] == p) return 1
+            if (index(p, plv[u2, i] "/") == 1) return 1
+        }
+        return 0
+    }
+    function touchedp(u2, p,   i) {
+        if ((u2 SUBSEP p) in tpseen) return 1
+        for (i = 1; i <= ntp[u2]; i++) if (index(tpv[u2, i], p "/") == 1) return 1
+        return 0
+    }
+    # drift facts for one unit: sets D_pu (planned untouched), D_tu (touched
+    # unplanned), D_ed (edited alongside implementation), D_eds (their shas)
+    function drift(u2,   i, sha, n) {
+        D_pu = 0; D_tu = 0; D_ed = 0; D_eds = ""; n = 0
+        for (i = 1; i <= npl[u2]; i++) if (!touchedp(u2, plv[u2, i])) D_pu++
+        if (npl[u2] > 0) for (i = 1; i <= ntp[u2]; i++) if (!planned(u2, tpv[u2, i])) D_tu++
+        for (i = 1; i <= ncm[u2]; i++) {
+            sha = cmv[u2, i]
+            if ((u2 SUBSEP sha) in docT && (u2 SUBSEP sha) in implT) {
+                D_ed = 1
+                if (n < 5) { D_eds = join(D_eds, substr(sha, 1, 7)); n++ }
+            }
+        }
+    }
+    # git history of the unit, over its files and their pre-archive paths
+    function history(u2,   i, p) {
+        H_fs = ""; H_fa = ""; H_ls = ""; H_la = ""; bf = 0; bl = 0
+        for (i = 1; i <= nf[u2] + na[u2]; i++) {
+            p = (i <= nf[u2]) ? fp[u2, i] : ap[u2, i - nf[u2]]
+            if (!(p in hfc)) continue
+            if (H_fs == "" || hfc[p] > bf) { H_fs = hfs[p]; H_fa = hfa[p]; bf = hfc[p] }
+            if (H_ls == "" || hlc[p] < bl) { H_ls = hls[p]; H_la = hla[p]; bl = hlc[p] }
+        }
+    }
+    function pathsjson(u2,   i, s, p) {
+        s = ""
+        for (i = 1; i <= ng[u2]; i++) {
+            p = gg[u2, i]
+            if ((u2 SUBSEP "g" SUBSEP p) in pjseen) continue
+            pjseen[u2 SUBSEP "g" SUBSEP p] = 1
+            s = join(s, jstr(p))
+        }
+        for (i = 1; i <= ntp[u2]; i++) s = join(s, jstr(tpv[u2, i]))
+        return s
+    }
+    function row(u2,   s, i, j, a, c, t, gj, fj, cj, qj, tj, plj, trj, dj, docs, p, dr, d) {
+        history(u2)
+        t = closedon[u2]
+        if (t == "" && state[u2] == "done" && H_la != "") t = substr(H_la, 1, 10)
+        gj = (gk[u2] == "") ? "null" : "{\"kind\":" jstr(gk[u2]) ",\"id\":" jstr(gid[u2]) "}"
+        fj = ""
+        for (i = 1; i <= nf[u2]; i++) {
+            p = fp[u2, i]
+            fj = join(fj, "{\"path\":" jstr(p) ",\"oid\":" jnull(oidof[p]) "}")
+        }
+        cj = ""
+        for (i = 1; i <= ncap[u2]; i++) cj = join(cj, jstr(capv[u2, i]))
+        qj = ""
+        for (i = 1; i <= nq[u2]; i++) {
+            c = "{\"id\":" jstr(qid[u2, i]) ",\"state\":" jstr(qst[u2, i]) ",\"scenarios\":" (qsc[u2, i] + 0) ",\"capability\":" jnull(qcap[u2, i])
+            if (text) c = c ",\"text\":" jstr(qtx[u2, i])
+            qj = join(qj, c "}")
+        }
+        tj = ""
+        for (i = 1; i <= nt[u2]; i++) {
+            c = "{\"id\":" jstr(tid[u2, i]) ",\"done\":" jbool(tdone[u2, i] == 1) ",\"story\":" jnull(tstory[u2, i]) ",\"parallel\":" jbool(tpar[u2, i] == 1) ",\"status\":" jnull(tst[u2, i])
+            if (text) c = c ",\"text\":" jstr(ttx[u2, i])
+            tj = join(tj, c "}")
+        }
+        plj = ""
+        for (i = 1; i <= npl[u2]; i++) plj = join(plj, jstr(plv[u2, i]))
+        if (kind[u2] == "zavet" || state[u2] == "unresolved") dj = "null"
+        else {
+            drift(u2)
+            dj = "{\"plannedUntouched\":" D_pu ",\"touchedUnplanned\":" D_tu ",\"editedWithImplementation\":" jbool(D_ed) "}"
+        }
+        s = "{\"v\":1,\"slug\":" jstr(slug[u2]) ",\"kind\":" jstr(kind[u2]) ",\"id\":" jstr(id[u2]) ",\"root\":" jstr(root[u2])
+        s = s ",\"frameworkVersion\":" jnull(fw[u2]) ",\"title\":" jnull(title[u2]) ",\"origin\":" jstr(origin[u2]) ",\"verified\":" jbool(verified[u2] == "true")
+        s = s ",\"state\":" jstr(state[u2]) ",\"nativeState\":" jnull(nat[u2]) ",\"group\":" gj ",\"capabilities\":[" cj "],\"risk\":" jnull(risk[u2])
+        s = s ",\"primary\":" jnull(primary[u2]) ",\"files\":[" fj "]"
+        s = s ",\"firstCommit\":" jnull(H_fs) ",\"firstAt\":" jnull(H_fa) ",\"lastCommit\":" jnull(H_ls) ",\"lastAt\":" jnull(H_la) ",\"closedOn\":" jnull(t)
+        s = s ",\"paths\":[" (state[u2] == "unresolved" ? "" : pathsjson(u2)) "],\"plannedPaths\":[" plj "],\"requirements\":[" qj "],\"tasks\":[" tj "],\"drift\":" dj
+        if (text) {
+            trj = ""
+            for (i = 1; i <= ntr[u2]; i++) trj = join(trj, jstr(trv[u2, i]))
+            docs = ""
+            if (kind[u2] != "zavet") {
+                for (i = 1; i <= nf[u2]; i++) {
+                    p = fp[u2, i]
+                    if ((slug[u2] SUBSEP p) in isdocp) docs = join(docs, "{\"path\":" jstr(p) ",\"md\":" jstr(readdoc(p)) "}")
+                }
+            }
+            s = s ",\"trackerRefs\":[" trj "],\"summary\":" jnull(summ[u2]) ",\"docs\":[" docs "]"
+        }
+        s = s ",\"unresolved\":" jnull(unres[u2]) "}"
+        return s
+    }
+    END {
+        loadacc()
+        for (u = 1; u <= nu; u++) {
+            if (mode == "json") print row(u)
+            else if (mode == "paths") {
+                if (state[u] == "unresolved") continue
+                # A source-level glob covers live work. An archived or removed
+                # unit keeps only the paths its own commits accreted, or every
+                # finished change would go on claiming the whole source.
+                if (!closed(state[u]))
+                    for (i = 1; i <= ng[u]; i++) print slug[u] "\t" gg[u, i]
+                for (i = 1; i <= ntp[u]; i++) print slug[u] "\t" globesc(tpv[u, i])
+            }
+            else if (mode == "anchors") {
+                if (!live(state[u])) continue
+                for (i = 1; i <= nf[u]; i++) print slug[u] "\t" fp[u, i]
+            }
+            else if (mode == "tsv") {
+                if (state[u] == "unresolved") print slug[u] "\texternal\tunresolved\t\t" unres[u]
+                else print slug[u] "\texternal\t-\t\t" title[u]
+            }
+            else if (mode == "ctx") {
+                if (!live(state[u]) || state[u] == "done") continue
+                print slug[u] "\t" title[u] "\t" (tdn[u] + 0) "\t" (nt[u] + 0)
+            }
+            else if (mode == "audit") {
+                if (state[u] == "unresolved") { print "source-unresolved\t" slug[u] "\t" unres[u]; continue }
+                drift(u)
+                if (D_ed) print "source-spec-edited-in-implementing-change\t" slug[u] "\t" D_eds
+                if (npl[u] > 0 && ncm[u] > 0 && D_pu > 0) {
+                    s = ""
+                    for (i = 1; i <= npl[u] && j < 3; i++) if (!touchedp(u, plv[u, i])) { s = join(s, plv[u, i]); j++ }
+                    j = 0
+                    print "planned-not-touched\t" slug[u] "\t" D_pu "\t" s
+                }
+                if (npl[u] > 0 && ncm[u] > 0 && D_tu > 0) print "touched-not-planned\t" slug[u] "\t" D_tu
+                if (state[u] != "archived" && ng[u] == 0 && ntp[u] == 0) print "paths-none-yet\t" slug[u]
+            }
+        }
+    }
+    '
+}
+
+# -- git facts: accretion, unit history, blob oids ---------------------------
+
+# Absolute path of THIS worktree's git dir (not the common one): the memos
+# below are per worktree, so two worktrees on different branches never
+# overwrite each other's table and force a rebuild on every switch.
+sdlc_git_dir() { # $1 = top
+    _cm=$(git -C "$1" rev-parse --git-dir 2>/dev/null) || return 1
+    case "$_cm" in
+        /*) ;;
+        *) _cm="$1/$_cm" ;;
+    esac
+    printf '%s\n' "$_cm"
+}
+
+# Drop memo files nobody has touched for a week (stale root sets, memos of the
+# pre-incremental layout). The live memo of a worktree is rewritten on every
+# new HEAD, so it never ages out while the worktree is in use.
+sdlc_memo_prune() { # $1 = dir
+    find "$1" -maxdepth 1 \( -name 'zavet-accrete*' -o -name 'zavet-unithist*' \) -mtime +7 -exec rm -f {} \; 2>/dev/null || true
+}
+
+# Print the slugs named in every `Spec:` trailer of a commit message (stdin),
+# one per line. `Spec:` takes a comma list; a slug is native (`capture-pipeline`)
+# or `<kind>:<id>`; ids come from file and directory names, so they may carry
+# uppercase and `+`. Anchored at the line start like a real trailer; CRLF
+# messages are read as LF.
+spec_trailer_slugs() {
+    awk '
+        { sub(/\r$/, "") }
+        /^Spec:/ {
+            n = split(substr($0, 6), parts, ",")
+            for (i = 1; i <= n; i++) {
+                p = parts[i]
+                sub(/^[ \t]+/, "", p); sub(/[ \t].*$/, "", p)
+                if (p ~ /^[A-Za-z0-9][A-Za-z0-9:._+-]*$/ && !(p in seen)) { seen[p] = 1; print p }
+            }
+        }
+    '
+}
+
+# stdin = the accretion `git log` text; prints slug<TAB>sha<TAB>path rows.
+sdlc_acc_rows() {
+    awk '
+        { sub(/\r$/, "") }
+        index($0, "@@zavet-c@@ ") == 1 { sha = substr($0, 13); inmsg = 1; ns = 0; split("", seen); next }
+        inmsg && $0 == "@@zavet-e@@" { inmsg = 0; next }
+        inmsg {
+            if ($0 ~ /^Spec:/) {
+                n = split(substr($0, 6), parts, ",")
+                for (i = 1; i <= n; i++) {
+                    p = parts[i]
+                    sub(/^[ \t]+/, "", p); sub(/[ \t].*$/, "", p)
+                    if (p ~ /^[A-Za-z0-9][A-Za-z0-9:._+-]*$/ && !(p in seen)) { seen[p] = 1; sl[++ns] = p }
+                }
+            }
+            next
+        }
+        $0 == "" || sha == "" { next }
+        { for (i = 1; i <= ns; i++) print sl[i] "\t" sha "\t" $0 }
+    '
+}
+
+# Rows for the commits in a range ("HEAD" = the whole history) into $3. The git
+# output goes to a file first and its exit status is checked, so a failed or
+# interrupted `git log` never turns into an empty table that gets memoized.
+sdlc_acc_build() { # $1 = top, $2 = range, $3 = output file
+    _ab_log="$3.log"
+    if ! git -C "$1" -c core.quotepath=false log -E --no-merges --grep='^Spec:' --name-only \
+        --format='@@zavet-c@@ %H%n%B%n@@zavet-e@@' "$2" -- >"$_ab_log" 2>/dev/null; then
+        rm -f "$_ab_log"
+        return 1
+    fi
+    sdlc_acc_rows <"$_ab_log" >"$3" 2>/dev/null
+    _ab_rc=$?
+    rm -f "$_ab_log"
+    return "$_ab_rc"
+}
+
+# slug<TAB>sha<TAB>path for every file touched by a commit that carries a
+# `Spec:` trailer. Memoized once per worktree, beside its git dir, with the
+# HEAD the table covers on its first line. A new HEAD that descends from the
+# memoized one only walks `old..HEAD` and prepends those rows (so the table is
+# byte-identical to a full rebuild); anything else (rebase, reset, first run)
+# rebuilds. `zavet gate` runs on every commit, so this keeps it from walking
+# the whole history each time. Sets sd_acc to the table's path, or "" when
+# there is none; sd_acc_tmp=1 means the caller must remove it (the memo
+# location was not writable: fail open).
+sdlc_accretion() { # $1 = top
+    sd_acc=""
+    sd_acc_tmp=0
+    _ac_head=$(git -C "$1" rev-parse --verify --quiet HEAD 2>/dev/null) || return 0
+    _ac_dir=$(sdlc_git_dir "$1") || _ac_dir=""
+    _ac_memo=""
+    [ -z "$_ac_dir" ] || _ac_memo="$_ac_dir/zavet-accrete.memo"
+    _ac_prev=""
+    if [ -n "$_ac_memo" ] && [ -f "$_ac_memo" ]; then
+        _ac_prev=$(sed -n '1s/^#zavet-head //p' "$_ac_memo" 2>/dev/null)
+        if [ "$_ac_prev" = "$_ac_head" ]; then
+            sd_acc=$_ac_memo
+            return 0
+        fi
+    fi
+    _ac_out="${TMPDIR:-/tmp}/zavet-acc.$$"
+    # New rows: just the range when HEAD descends from the memoized one, else
+    # the whole history. Either way a failed `git log` leaves no table at all.
+    _ac_base=""
+    if [ -n "$_ac_prev" ] && git -C "$1" merge-base --is-ancestor "$_ac_prev" "$_ac_head" 2>/dev/null \
+        && sdlc_acc_build "$1" "$_ac_prev..$_ac_head" "$_ac_out.new"; then
+        _ac_base=$_ac_memo
+    elif ! sdlc_acc_build "$1" HEAD "$_ac_out.new"; then
+        rm -f "$_ac_out.new"
+        return 0
+    fi
+    # Assemble straight into the memo's own directory and rename, so the table
+    # is written once; if that directory is not writable use a temp file.
+    _ac_dest=$_ac_out
+    [ -z "$_ac_memo" ] || _ac_dest="$_ac_memo.$$"
+    if ! sdlc_acc_assemble "$_ac_dest" "$_ac_head" "$_ac_out.new" "$_ac_base"; then
+        rm -f "$_ac_dest"
+        _ac_dest=$_ac_out
+        if ! sdlc_acc_assemble "$_ac_dest" "$_ac_head" "$_ac_out.new" "$_ac_base"; then
+            rm -f "$_ac_dest" "$_ac_out.new"
+            return 0
+        fi
+    fi
+    rm -f "$_ac_out.new"
+    if [ "$_ac_dest" != "$_ac_out" ] && mv "$_ac_dest" "$_ac_memo" 2>/dev/null; then
+        sd_acc=$_ac_memo
+        sdlc_memo_prune "$_ac_dir"
+    else
+        [ "$_ac_dest" = "$_ac_out" ] || { cp "$_ac_dest" "$_ac_out" 2>/dev/null; rm -f "$_ac_dest"; }
+        sd_acc=$_ac_out
+        sd_acc_tmp=1
+    fi
+}
+
+# memo = header, the new rows, then (incremental) every older row.
+sdlc_acc_assemble() { # $1 = dest, $2 = head, $3 = new rows, $4 = old memo or ""
+    { printf '#zavet-head %s\n' "$2"; cat "$3"; [ -z "$4" ] || sed 1d "$4"; } >"$1" 2>/dev/null
+}
+
+sdlc_acc_release() {
+    [ "${sd_acc_tmp:-0}" = 1 ] && rm -f "$sd_acc"
+    sd_acc=""
+    sd_acc_tmp=0
+}
+
+# Per-path oldest/newest commit over a range into $3 (stdin-free). $4 = the
+# previous memo to fold in ("" for a full walk): its commits are older than the
+# range, so their ordinals shift by the number of commits the range listed.
+sdlc_hist_build() { # $1 = top, $2 = range, $3 = output file, $4 = prior memo, rest = pathspec
+    _hb_top=$1
+    _hb_range=$2
+    _hb_out=$3
+    _hb_prior=$4
+    shift 4
+    _hb_log="$_hb_out.log"
+    if ! git -C "$_hb_top" -c core.quotepath=false log --no-renames --name-only \
+        --format='@@zavet-c@@ %H %aI' "$_hb_range" -- "$@" >"$_hb_log" 2>/dev/null; then
+        rm -f "$_hb_log"
+        return 1
+    fi
+    awk -v priorf="$_hb_prior" '
+        BEGIN {
+            if (priorf != "") {
+                while ((getline l < priorf) > 0) {
+                    if (index(l, "#zavet-head ") == 1) continue
+                    split(l, a, "\t")
+                    ofs[a[1]] = a[2]; ofc[a[1]] = a[3] + 0; ofa[a[1]] = a[4]
+                    ols[a[1]] = a[5]; olc[a[1]] = a[6] + 0; ola[a[1]] = a[7]
+                }
+                close(priorf)
+            }
+        }
+        # The ordinal is the commit position in git log order (newest = 1): two
+        # commits in the same second still order correctly, which a timestamp
+        # cannot promise.
+        index($0, "@@zavet-c@@ ") == 1 { split(substr($0, 13), a, " "); sha = a[1]; at = a[2]; ord++; next }
+        $0 == "" || sha == "" { next }
+        {
+            p = $0
+            if (!(p in lsha)) { lsha[p] = sha; lord[p] = ord; lat[p] = at }
+            fsha[p] = sha; ford[p] = ord; fat[p] = at
+        }
+        END {
+            for (p in lsha) {
+                if (p in ofs) printf "%s\t%s\t%d\t%s\t%s\t%d\t%s\n", p, ofs[p], ofc[p] + ord, ofa[p], lsha[p], lord[p], lat[p]
+                else printf "%s\t%s\t%d\t%s\t%s\t%d\t%s\n", p, fsha[p], ford[p], fat[p], lsha[p], lord[p], lat[p]
+            }
+            for (p in ofs) if (!(p in lsha)) printf "%s\t%s\t%d\t%s\t%s\t%d\t%s\n", p, ofs[p], ofc[p] + ord, ofa[p], ols[p], olc[p] + ord, ola[p]
+        }
+    ' "$_hb_log" >"$_hb_out" 2>/dev/null
+    _hb_rc=$?
+    rm -f "$_hb_log"
+    return "$_hb_rc"
+}
+
+# One batched `git log` over the source roots (and native specs): per path, the
+# oldest and newest commit. Memoized per worktree and root set, incrementally
+# like sdlc_accretion. Sets sd_hist / sd_hist_tmp the same way.
+sdlc_history() { # $1 = top; the rest = pathspec roots
+    _hi_top=$1
+    shift
+    sd_hist=""
+    sd_hist_tmp=0
+    [ $# -gt 0 ] || return 0
+    _hi_head=$(git -C "$_hi_top" rev-parse --verify --quiet HEAD 2>/dev/null) || return 0
+    _hi_key=$(printf '%s\n' "$@" | cksum | awk '{ print $1 }')
+    _hi_dir=$(sdlc_git_dir "$_hi_top") || _hi_dir=""
+    _hi_memo=""
+    [ -z "$_hi_dir" ] || _hi_memo="$_hi_dir/zavet-unithist-$_hi_key.memo"
+    _hi_prev=""
+    if [ -n "$_hi_memo" ] && [ -f "$_hi_memo" ]; then
+        _hi_prev=$(sed -n '1s/^#zavet-head //p' "$_hi_memo" 2>/dev/null)
+        if [ "$_hi_prev" = "$_hi_head" ]; then
+            sd_hist=$_hi_memo
+            return 0
+        fi
+    fi
+    _hi_out="${TMPDIR:-/tmp}/zavet-hist.$$"
+    _hi_ok=0
+    if [ -n "$_hi_prev" ] && git -C "$_hi_top" merge-base --is-ancestor "$_hi_prev" "$_hi_head" 2>/dev/null \
+        && sdlc_hist_build "$_hi_top" "$_hi_prev..$_hi_head" "$_hi_out.new" "$_hi_memo" "$@"; then
+        { printf '#zavet-head %s\n' "$_hi_head"; cat "$_hi_out.new"; } >"$_hi_out" 2>/dev/null && _hi_ok=1
+    fi
+    if [ "$_hi_ok" -eq 0 ] && sdlc_hist_build "$_hi_top" HEAD "$_hi_out.new" "" "$@"; then
+        { printf '#zavet-head %s\n' "$_hi_head"; cat "$_hi_out.new"; } >"$_hi_out" 2>/dev/null && _hi_ok=1
+    fi
+    rm -f "$_hi_out.new"
+    if [ "$_hi_ok" -eq 0 ]; then
+        rm -f "$_hi_out"
+        return 0
+    fi
+    if [ -n "$_hi_memo" ] && cp "$_hi_out" "$_hi_memo.$$" 2>/dev/null && mv "$_hi_memo.$$" "$_hi_memo" 2>/dev/null; then
+        rm -f "$_hi_out"
+        sd_hist=$_hi_memo
+        sdlc_memo_prune "$_hi_dir"
+    else
+        [ -z "$_hi_memo" ] || rm -f "$_hi_memo.$$" 2>/dev/null
+        sd_hist=$_hi_out
+        sd_hist_tmp=1
+    fi
+}
+
+sdlc_hist_release() {
+    [ "${sd_hist_tmp:-0}" = 1 ] && rm -f "$sd_hist"
+    sd_hist=""
+    sd_hist_tmp=0
+}
+
+# path<TAB>blob oid for every file row of a stream. Working-tree content, so it
+# reflects what is on disk even before a commit.
+sdlc_oids() { # $1 = top, $2 = stream file, $3 = output file
+    : >"$3"
+    awk -F '\t' '$1 == "F" { if ((getline x < $3) >= 0) print $3; close($3) }' "$2" >"$3.list" 2>/dev/null || return 0
+    git -C "$1" hash-object --stdin-paths <"$3.list" >"$3.oid" 2>/dev/null || return 0
+    awk 'NR == FNR { p[FNR] = $0; next } { print p[FNR] "\t" $0 }' "$3.list" "$3.oid" >"$3" 2>/dev/null
+    rm -f "$3.list" "$3.oid"
+}
+
+# -- native specs as stream rows ----------------------------------------------
+
+sdlc_native_stream() { # $1 = top
+    set -- "$1/$ZAVET_DIR"/specs/*.md
+    [ -e "$1" ] || return 0
+    spec_frontmatter unit "$@" | awk -F '\t' -v dir="$ZAVET_DIR/specs" '
+        {
+            p = dir "/" $1 ".md"
+            # U: slug kind id root title state, six empty columns, then the
+            # primary file, origin, verified and an empty unresolved reason.
+            printf "U\t%s\tzavet\t%s\t%s\t%s\tactive\t\t\t\t\t\t\t%s\t%s\t%s\t\n", \
+                $1, $1, dir, $5, p, $2, ($6 == "true") ? "true" : "false"
+            print "F\t" $1 "\t" p "\t1"
+        }
+    '
+    spec_frontmatter paths "$@" | awk -F '\t' '{ print "G\t" $1 "\t" $2 }'
+}
+
+# -- views ------------------------------------------------------------------
+
+# `zavet specs --json`: every unit, native and source-backed, as JSON Lines.
+sdlc_specs_json() { # $1 = top, $2 = text (0|1)
+    _sj_top=$1
+    _sj_text=$2
+    _sj_tmp="${TMPDIR:-/tmp}/zavet-sdlc.$$"
+    rm -rf "$_sj_tmp"
+    mkdir "$_sj_tmp" 2>/dev/null || die "cannot create $_sj_tmp"
+    # Every stage's status is kept: a piped `| sort` would report its own 0
+    # and hand dira an empty or partial list that reads as "no units".
+    _sj_rc=0
+    sdlc_native_stream "$_sj_top" >"$_sj_tmp/stream" || _sj_rc=1
+    sdlc_stream "$_sj_top" "$_sj_text" >>"$_sj_tmp/stream" || _sj_rc=1
+    sdlc_oids "$_sj_top" "$_sj_tmp/stream" "$_sj_tmp/oid"
+    # Source roots hold no whitespace or glob characters (spec_sources rejects
+    # them), so the unquoted expansion splits cleanly into pathspecs.
+    # shellcheck disable=SC2046
+    sdlc_history "$_sj_top" "$ZAVET_DIR/specs" $(awk -F '\t' '$1 == "D" { print $2 }' "$_sj_tmp/stream")
+    sdlc_accretion "$_sj_top"
+    (cd -- "$_sj_top" && sdlc_emit json "$_sj_text" "$sd_hist" "$_sj_tmp/oid" "$sd_acc") <"$_sj_tmp/stream" >"$_sj_tmp/rows" || _sj_rc=1
+    sdlc_acc_release
+    sdlc_hist_release
+    if [ "$_sj_rc" -eq 0 ]; then
+        LC_ALL=C sort "$_sj_tmp/rows" || _sj_rc=1
+    else
+        printf 'zavet: specs --json failed; refusing to print a partial list\n' >&2
+    fi
+    rm -rf "$_sj_tmp"
+    return "$_sj_rc"
+}
+
+# Source-backed rows of the plain-TSV `zavet specs` (slug, origin, confidence,
+# date, title). No git: the date column stays empty.
+sdlc_source_tsv() { # $1 = top
+    sdlc_stream "$1" 0 | sdlc_emit tsv 0
+}
+
+# slug<TAB>glob for every source unit: declared globs verbatim plus the paths
+# accreted from `Spec:` trailers, escaped so `case` matches them literally.
+sdlc_source_paths() { # $1 = top
+    _sp_m=$(sdlc_manifest "$1")
+    [ -n "$_sp_m" ] || return 0
+    # A declared root with no units yet has nothing to accrete onto.
+    printf '%s\n' "$_sp_m" | grep -q '^U' || return 0
+    sdlc_accretion "$1"
+    printf '%s\n' "$_sp_m" | (cd -- "$1" && sdlc_parse 0 0) | sdlc_emit paths 0 "" "" "$sd_acc"
+    sdlc_acc_release
+}
+
+# One `<row>\t<name>\t<n>\t<short sha>` line when n > 0 commits landed since
+# commit $4 on the pathspecs after `--`. Everything between $4 and `--` goes to
+# `git log` as is (the source-unit form filters out commits that cite the unit).
+# Prints nothing otherwise; always succeeds. Report-only: a git failure counts 0.
+stale_row() { # $1 = root, $2 = row name, $3 = id, $4 = last sha, [log args] -- pathspec...
+    _sr_root=$1
+    _sr_row=$2
+    _sr_id=$3
+    _sr_last=$4
+    shift 4
+    _sr_n=$(git -C "$_sr_root" log --format=%H "$_sr_last..HEAD" "$@" 2>/dev/null | wc -l)
+    _sr_n=$((_sr_n + 0))
+    if [ "$_sr_n" -gt 0 ]; then
+        printf '%s\t%s\t%s\t%s\n' "$_sr_row" "$_sr_id" "$_sr_n" "$(git -C "$_sr_root" rev-parse --short "$_sr_last")"
+    fi
+    return 0
+}
+
+# The `audit` rows for source units: the advisory drift classes, plus
+# stale-spec anchored on the unit's own files. Report-only like the rest.
+sdlc_audit() { # $1 = root
+    _au_root=$1
+    _au_m=$(sdlc_manifest "$_au_root")
+    [ -n "$_au_m" ] || return 0
+    _au_tmp="${TMPDIR:-/tmp}/zavet-audit-sdlc.$$"
+    rm -rf "$_au_tmp"
+    mkdir "$_au_tmp" 2>/dev/null || return 0
+    printf '%s\n' "$_au_m" | (cd -- "$_au_root" && sdlc_parse 1 0) >"$_au_tmp/stream"
+    sdlc_accretion "$_au_root"
+    sdlc_emit audit 0 "" "" "$sd_acc" <"$_au_tmp/stream"
+    sdlc_emit anchors 0 "" "" "" <"$_au_tmp/stream" >"$_au_tmp/anchors"
+    sdlc_emit paths 0 "" "" "$sd_acc" <"$_au_tmp/stream" >"$_au_tmp/paths"
+    sdlc_acc_release
+    _au_nl='
+'
+    _au_old=$IFS
+    awk -F '\t' '!s[$1]++ { print $1 }' "$_au_tmp/anchors" >"$_au_tmp/slugs"
+    while IFS= read -r _au_slug; do
+        # The spec files' last commit, then every commit since that touched a
+        # path this unit covers and does NOT cite it: the framework's files are
+        # the prior commitment, so a citing commit is the unit working as
+        # intended, not drift.
+        IFS=$_au_nl
+        set -f
+        # shellcheck disable=SC2046
+        set -- $(awk -F '\t' -v s="$_au_slug" '$1 == s { print ":(literal)" $2 }' "$_au_tmp/anchors")
+        set +f
+        IFS=$_au_old
+        _au_last=$(git -C "$_au_root" log -1 --format=%H -- "$@" 2>/dev/null)
+        [ -n "$_au_last" ] || continue
+        IFS=$_au_nl
+        set -f
+        # shellcheck disable=SC2046
+        set -- $(awk -F '\t' -v s="$_au_slug" '$1 == s { print ":(glob)" $2 }' "$_au_tmp/paths")
+        set +f
+        IFS=$_au_old
+        [ $# -gt 0 ] || continue
+        _au_re=$(printf '%s' "$_au_slug" | sed 's/[].[^$*+?(){}|\\]/\\&/g')
+        stale_row "$_au_root" stale-spec "$_au_slug" "$_au_last" -E --invert-grep \
+            --grep="^Spec:[[:space:]]*(.*,[[:space:]]*)?$_au_re([[:space:],]|\$)" -- "$@"
+    done <"$_au_tmp/slugs"
+    rm -rf "$_au_tmp"
+}
+
+# The "### Spec sources" section of the context payload. The generated files
+# (AGENTS.md, .grok rules) get the stable part only: the units come and go with
+# every checkbox and archive, which would leave a committed index stale.
+sdlc_ctx() { # $1 = root, $2 = "hook" | "file"
+    _cx_src=$(spec_sources "$1")
+    [ -n "$_cx_src" ] || return 0
+    printf '\n### Spec sources (read-only: cite them, never edit them)\n\n'
+    printf '%s\n' "$_cx_src" | awk -F '\t' '{ print "- " $1 " in " $2 }'
+    if [ "$2" = hook ]; then
+        _cx_units=$(sdlc_stream "$1" 0 live | sdlc_emit ctx 0 | head -n 10)
+        if [ -n "$_cx_units" ]; then
+            printf '\nActive units:\n\n'
+            printf '%s\n' "$_cx_units" | awk -F '\t' '{
+                line = "- " $1
+                if ($2 != "") line = line " — " $2
+                if ($4 > 0) line = line " (tasks " $3 "/" $4 ")"
+                print line
+            }'
+        fi
+    fi
+    # shellcheck disable=SC2016
+    printf '\nCite the unit you work under with a `Spec: <kind>:<id>` trailer on every commit (comma-separate several). The spec-maintenance rule above covers %s/specs/ only: these units belong to their framework, so change their files only through its own commands, never to make a spec agree with your code.\n' "$ZAVET_DIR"
+}
+
+# -- commands -----------------------------------------------------------------
+
+# Frameworks present in the repo, as kind<TAB>root. Stat only.
+sdlc_detect() { # $1 = top
+    [ -d "$1/openspec" ] && printf 'openspec\topenspec\n'
+    [ -d "$1/.specify" ] && [ -d "$1/specs" ] && printf 'speckit\tspecs\n'
+    if [ -d "$1/_bmad" ]; then
+        printf 'bmad\t%s\n' "$(sdlc_root bmad "$1" _bmad-output)"
+    fi
+    [ -d "$1/docs/superpowers" ] && printf 'superpowers\tdocs/superpowers\n'
+    return 0
+}
+
+# Append `spec-source:` lines to .zavet/config, creating the file if needed.
+sdlc_config_append() { # $1 = config path, $2 = kind, $3 = root
+    if [ -s "$1" ] && [ -n "$(tail -c 1 "$1" 2>/dev/null)" ]; then
+        printf '\n' >>"$1"
+    fi
+    printf 'spec-source: %s %s\n' "$2" "$3" >>"$1"
+}
+
+cmd_spec_sources() {
+    _ds_detect=0
+    _ds_write=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --detect) _ds_detect=1; shift ;;
+            --write) _ds_write=1; shift ;;
+            --list) spec_sources "$(zavet_root)"; return 0 ;;
+            *) die "usage: zavet spec-sources [--detect] [--write] [--list]" ;;
+        esac
+    done
+    [ "$_ds_write" -eq 0 ] || _ds_detect=1
+    _ds_top=$(repo_toplevel) || die "not inside a git repository"
+    if [ "$_ds_detect" -eq 0 ]; then
+        _ds_top=$(zavet_root)
+        _ds_tab=$(printf '\t')
+        _ds_stream="${TMPDIR:-/tmp}/zavet-ss.$$"
+        sdlc_stream "$_ds_top" 0 >"$_ds_stream"
+        spec_sources "$_ds_top" all | while IFS="$_ds_tab" read -r _ds_st _ds_kind _ds_root _ds_globs; do
+            if [ "$_ds_st" != ok ]; then
+                printf 'source-%s\t%s\t%s\n' "$_ds_st" "$_ds_kind" "$_ds_root"
+                continue
+            fi
+            _ds_eff=$(sdlc_root "$_ds_kind" "$_ds_top" "$_ds_root")
+            if [ ! -d "$_ds_top/$_ds_eff" ]; then
+                printf 'source-root-missing\t%s\t%s\n' "$_ds_kind" "$_ds_root"
+                continue
+            fi
+            awk -F '\t' -v k="$_ds_kind" -v r="$_ds_eff" -v g="$_ds_globs" '
+                $1 == "U" && $3 == k && $5 == r { n++; if ($7 == "unresolved") bad++ }
+                END { printf "source\t%s\t%s\t%d\t%d\t%s\n", k, r, n, bad, g }
+            ' "$_ds_stream"
+            sdlc_report "$_ds_kind" "$_ds_top" "$_ds_eff"
+        done
+        rm -f "$_ds_stream"
+        return 0
+    fi
+    _ds_cfg="$_ds_top/$ZAVET_DIR/config"
+    if [ "$_ds_write" -eq 1 ] && [ ! -d "$_ds_top/$ZAVET_DIR" ]; then
+        die "no $ZAVET_DIR/ in $_ds_top (run: zavet init)"
+    fi
+    _ds_known=$(spec_sources "$_ds_top")
+    _ds_tab=$(printf '\t')
+    sdlc_detect "$_ds_top" | while IFS="$_ds_tab" read -r _ds_kind _ds_root; do
+        # A `spec-source:` line is whitespace-separated, so a root holding
+        # whitespace (or a glob character) could only be written ambiguously:
+        # report it and leave the config alone.
+        case "$_ds_root" in
+            *[[:space:]]* | *[\*\?\[]*)
+                printf 'source-root-invalid\t%s\t%s\n' "$_ds_kind" "$_ds_root"
+                continue
+                ;;
+        esac
+        if printf '%s\n' "$_ds_known" | awk -F '\t' -v k="$_ds_kind" -v r="$_ds_root" '$1 == k && $2 == r { f = 1 } END { exit !f }'; then
+            printf 'detect\t%s\t%s\tconfigured\n' "$_ds_kind" "$_ds_root"
+        elif [ "$_ds_write" -eq 1 ]; then
+            sdlc_config_append "$_ds_cfg" "$_ds_kind" "$_ds_root"
+            printf 'written\t%s\t%s\n' "$_ds_kind" "$_ds_root"
+        else
+            printf 'detect\t%s\t%s\tnew\n' "$_ds_kind" "$_ds_root"
+        fi
+    done
+    # The constitution is reported whether or not Spec Kit was detected.
+    sdlc_report speckit "$_ds_top" ""
+    return 0
 }
 
 # CI enforcement floor over a commit range — the machine equivalent of the
@@ -1548,9 +3429,11 @@ cmd_check() {
         check_generated_context "$top"
         return "$rc"
     fi
-    # Commits already carrying a trailer never violate — their diffs are
-    # never even listed. The patterns come from zavet_refs_re / ZAVET_SPEC_RE,
-    # the same two `zavet gate` tests, so CI and the hooks cannot diverge.
+    # Commits already carrying a Refs:/Supersedes: trailer never violate — their
+    # diffs are never even listed for the guard wall. The patterns come from
+    # zavet_refs_re / ZAVET_SPEC_RE, the same two `zavet gate` tests, so CI and
+    # the hooks cannot diverge. A Spec: trailer only EXCUSES the specs it names:
+    # spec_set is just the commits worth reading a message for.
     refs_set="$nl$(git rev-list --no-merges -E --grep="$(zavet_refs_re "$top")" "$@" --)$nl"
     spec_set="$nl$(git rev-list --no-merges -E --grep="$ZAVET_SPEC_RE" "$@" --)$nl"
     violations=0
@@ -1561,7 +3444,6 @@ cmd_check() {
         [ -n "$guards_table" ] || need_guard=0
         [ -n "$specs_table" ] || need_spec=0
         case "$refs_set" in *"$nl$sha$nl"*) need_guard=0 ;; esac
-        case "$spec_set" in *"$nl$sha$nl"*) need_spec=0 ;; esac
         [ $need_guard -eq 1 ] || [ $need_spec -eq 1 ] || continue
         changed=$(git diff-tree -r --no-commit-id --name-only "$sha" --)
         [ -n "$changed" ] || continue
@@ -1577,10 +3459,22 @@ cmd_check() {
         fi
         if [ $need_spec -eq 1 ]; then
             slugs=$(printf '%s\n' "$changed" | run_match "$specs_table")
+            cited=""
+            case "$spec_set" in
+                *"$nl$sha$nl"*) [ -z "$slugs" ] || cited=$(git log -1 --format=%B "$sha" | spec_trailer_slugs) ;;
+            esac
             fresh=""
             for slug in $slugs; do
-                # A commit that updates the covering spec itself needs no trailer.
-                printf '%s\n' "$changed" | grep -qxF "$ZAVET_DIR/specs/$slug.md" && continue
+                # The commit's Spec: trailer must NAME the spec, not merely exist.
+                case "$nl$cited$nl" in *"$nl$slug$nl"*) continue ;; esac
+                # A commit that updates the covering NATIVE spec itself needs no
+                # trailer. A source-backed unit (slug is <kind>:<id>) is never
+                # exempted by touching its files: editing the prior commitment
+                # alongside the work is the drift `zavet audit` reports.
+                case "$slug" in
+                    *:*) ;;
+                    *) printf '%s\n' "$changed" | grep -qxF "$ZAVET_DIR/specs/$slug.md" && continue ;;
+                esac
                 fresh="$fresh $slug"
             done
             fresh=${fresh# }
@@ -1610,6 +3504,16 @@ cmd_check() {
         printf 'zavet check: %s commit(s) touch spec-covered paths without a Spec: trailer (warning only — keep specs current).\n' "$warnings" >&2
     fi
     return 0
+}
+
+# The first five words of a space-separated list joined by $2, then "+N more".
+cap_words() { # $1 = list, $2 = separator
+    printf '%s\n' "$1" | awk -v sep="$2" '{
+        n = split($0, w, " "); out = ""
+        for (i = 1; i <= n && i <= 5; i++) out = out (i > 1 ? sep : "") w[i]
+        if (n > 5) out = out sep "+" (n - 5) " more"
+        print out
+    }'
 }
 
 # THE guard wall over one PROSPECTIVE commit: the staged paths plus the message
@@ -1699,7 +3603,7 @@ cmd_gate() {
     top=$(repo_toplevel) || return 0
     [ -d "$top/$ZAVET_DIR" ] || return 0
     if [ "$have_paths" = 2 ]; then
-        staged=$(cd -- "$top" 2>/dev/null && git diff --cached --name-only 2>/dev/null)
+        staged=$(cd -- "$top" 2>/dev/null && git -c core.quotepath=false diff --cached --name-only 2>/dev/null)
     fi
     [ -n "$staged" ] || return 0
 
@@ -1744,11 +3648,14 @@ cmd_gate() {
     fi
 
     # --- Spec nudge ---------------------------------------------------------
-    # Satisfied by a `Spec:` trailer, by staging every covering spec file, or —
-    # with --session — by having already nudged for that spec this session.
+    # Each covering spec is satisfied by a `Spec:` trailer NAMING it, by staging
+    # its own file (native specs only), or — with --session — by having already
+    # nudged for it this session. A trailer for some other spec satisfies
+    # nothing: the grammar is a comma list of slugs, compared one by one.
     if [ "$want_nudge" -eq 1 ]; then
         covering=$(printf '%s\n' "$staged" | (cd -- "$top" && cmd_spec_match 2>/dev/null))
-        if [ -n "$covering" ] && ! printf '%s' "$message" | grep -qE "$ZAVET_SPEC_RE"; then
+        if [ -n "$covering" ]; then
+            cited=$(printf '%s\n' "$message" | spec_trailer_slugs)
             state=""
             if [ -n "$session" ]; then
                 # The session id names a temp file — keep it to a safe charset.
@@ -1756,20 +3663,50 @@ cmd_gate() {
                 state="${TMPDIR:-/tmp}/zavet-spec-shown-${_s}"
             fi
             fresh=""
+            fresh_src=""
             for slug in $covering; do
-                printf '%s\n' "$staged" | grep -qxF "$ZAVET_DIR/specs/$slug.md" && continue
+                case "$nl$cited$nl" in *"$nl$slug$nl"*) continue ;; esac
+                # Native specs may be satisfied by staging the spec file. A
+                # source-backed unit never is: its files belong to the framework
+                # and staging them is not an update this wall rewards.
+                case "$slug" in
+                    *:*) ;;
+                    *) printf '%s\n' "$staged" | grep -qxF "$ZAVET_DIR/specs/$slug.md" && continue ;;
+                esac
                 if [ -n "$state" ]; then
-                    grep -qx "$slug" "$state" 2>/dev/null && continue
+                    grep -qxF "$slug" "$state" 2>/dev/null && continue
                     printf '%s\n' "$slug" >>"$state" 2>/dev/null || true
                 fi
-                fresh="$fresh $slug"
+                case "$slug" in
+                    *:*) fresh_src="$fresh_src $slug" ;;
+                    *) fresh="$fresh $slug" ;;
+                esac
             done
             fresh=${fresh# }
+            fresh_src=${fresh_src# }
+            # One trailer line naming every spec still owed, comma separated.
+            # A nudge names at most five slugs: a broad glob can cover dozens of
+            # units and an unreadable wall of names is worse than "+N more".
+            owed=$(cap_words "$fresh $fresh_src" ", ")
+            fresh=$(cap_words "$fresh" " ")
+            fresh_src=$(cap_words "$fresh_src" " ")
+            nudge=""
             if [ -n "$fresh" ]; then
-                firstspec=${fresh%% *}
                 # shellcheck disable=SC2016
                 nudge=$(printf 'Staged changes touch paths covered by spec(s): %s (see %s/specs/). Keep the living spec current: update the sections your change affects (and its decisions/date), stage the spec file with this commit, and add a `Spec: %s` trailer. If the spec truly needs no update, just add the trailer.' \
-                    "$fresh" "$ZAVET_DIR" "$firstspec")
+                    "$fresh" "$ZAVET_DIR" "$owed")
+            fi
+            if [ -n "$fresh_src" ]; then
+                # shellcheck disable=SC2016
+                srcnudge=$(printf 'Staged changes touch paths covered by source-backed spec(s): %s. They belong to their framework and are read-only here: do not edit them to match your change. Add a `Spec: %s` trailer naming them.' \
+                    "$fresh_src" "$owed")
+                if [ -n "$nudge" ]; then
+                    nudge="${nudge}${nl}${nl}${srcnudge}"
+                else
+                    nudge=$srcnudge
+                fi
+            fi
+            if [ -n "$nudge" ]; then
                 [ -z "$state" ] || nudge="$nudge This reminder fires once per session."
                 if [ -n "$reasons" ]; then
                     reasons="${reasons}${nl}${nl}${nudge}"
@@ -1907,10 +3844,8 @@ cmd_audit() {
 
     # --- stale specs: commits touching a spec's paths since the spec file
     # itself last changed. Never-committed specs are skipped (fresh).
-    for f in "$root/$ZAVET_DIR"/specs/*.md; do
-        [ -e "$f" ] || continue
-        slug=${f##*/}
-        slug=${slug%.md}
+    each_unit "$root" native | while IFS="$tab" read -r slug _; do
+        [ -n "$slug" ] || continue
         last=$(git -C "$root" log -1 --format=%H -- "$ZAVET_DIR/specs/$slug.md")
         [ -n "$last" ] || continue
         set --
@@ -1920,11 +3855,12 @@ cmd_audit() {
 $specs_table
 EOF
         [ $# -gt 0 ] || continue
-        n=$(git -C "$root" log --format=%H "$last..HEAD" -- "$@" | wc -l)
-        n=$((n + 0))
-        [ "$n" -gt 0 ] || continue
-        printf 'stale-spec\t%s\t%s\t%s\n' "$slug" "$n" "$(git -C "$root" rev-parse --short "$last")"
+        stale_row "$root" stale-spec "$slug" "$last" -- "$@"
     done
+
+    # --- source-backed specs: the same stale-spec row anchored on the unit's own
+    # files, plus the advisory drift classes. Native specs never reach here.
+    sdlc_audit "$root"
 
     # --- cross-harness health: whether the knowledge layer actually reaches
     # agents that are not Claude Code, and whether the enforcement floor is
@@ -1982,10 +3918,7 @@ EOF
 $guards_table
 EOF
         [ $# -gt 0 ] || continue
-        n=$(git -C "$root" log --format=%H "$last..HEAD" -- "$@" | wc -l)
-        n=$((n + 0))
-        [ "$n" -gt 0 ] || continue
-        printf 'stale-decision\t%s\t%s\t%s\n' "$id" "$n" "$(git -C "$root" rev-parse --short "$last")"
+        stale_row "$root" stale-decision "$id" "$last" -- "$@"
     done
 
     # --- guard pressure: how many tracked files each active guard glob
@@ -2149,7 +4082,7 @@ cmd_index() {
     # scaffolded before the spec layer keep working untouched.
     if grep -qF "$MARK_SPECS_START" "$idx" 2>/dev/null; then
         blockfile="$idx.specs.$$"
-        cmd_specs | sort | awk -F '\t' '{
+        cmd_specs_native | sort | awk -F '\t' '{
             line = "- **" $1 "**"
             if ($5 != "") line = line " — " $5
             meta = $2 ", " $3
@@ -2205,7 +4138,7 @@ cmd_index() {
 # disagree about what this repo has decided.
 ctx_payload() { # $1 = root, $2 = "hook" | "file"
     _root=$1
-    # `_ctxmode`, not `_mode`: this function calls cmd_list/cmd_specs, which
+    # `_ctxmode`, not `_mode`: this function calls cmd_list/cmd_specs_native, which
     # assign `_mode` themselves. They happen to run inside `$( )` today, so the
     # assignment cannot leak back — but that is a property of the call sites,
     # not of the name, and the guard section below would vanish silently the day
@@ -2234,7 +4167,7 @@ ctx_payload() { # $1 = root, $2 = "hook" | "file"
             print line
         }'
     fi
-    _specs=$(cd -- "$_root" && cmd_specs 2>/dev/null)
+    _specs=$(cd -- "$_root" && cmd_specs_native 2>/dev/null)
     if [ -n "$_specs" ]; then
         printf '\n### Living specs (%s/specs/ — keep current while you work)\n\n' "$ZAVET_DIR"
         printf '%s\n' "$_specs" | sort | awk -F '\t' '{
@@ -2247,6 +4180,7 @@ ctx_payload() { # $1 = root, $2 = "hook" | "file"
     # shellcheck disable=SC2016
     printf 'Spec maintenance (do this as part of normal work, no command needed): when implementing or changing a feature, update its covering spec in %s/specs/ — or create one from %s/.spec-template.md (origin: session) for substantial new features — reference the decisions involved, and add a `Spec: <slug>` trailer to the commit.\n' \
         "$ZAVET_DIR" "$ZAVET_DIR"
+    sdlc_ctx "$_root" "$_ctxmode"
     # Only the file form says this. On Claude Code and Grok Build a guarded edit
     # is denied and the record shown, so telling the agent to go look would be
     # noise; everywhere else nothing stops it, and checking by hand is the only
@@ -3207,8 +5141,8 @@ cmd_version() {
     v=$(plugin_version)
     case "${1:-}" in
         --json)
-            printf '{"v":1,"plugin":"zavet","version":"%s","emit_schema":%s,"min_dira":"%s"}\n' \
-                "$(json_escape "$v")" "$ZAVET_EMIT_SCHEMA" "$(json_escape "$ZAVET_MIN_DIRA")"
+            printf '{"v":1,"plugin":"zavet","version":"%s","emit_schema":%s,"min_dira":"%s","specs_json":%s}\n' \
+                "$(json_escape "$v")" "$ZAVET_EMIT_SCHEMA" "$(json_escape "$ZAVET_MIN_DIRA")" "$ZAVET_SPECS_JSON"
             ;;
         "") printf '%s\n' "$v" ;;
         *) die "usage: zavet version [--json]" ;;
@@ -3230,7 +5164,8 @@ case "$cmd" in
     guards) cmd_guards ;;
     match) cmd_match "$@" ;;
     match-batch) cmd_match_batch ;;
-    specs) cmd_specs ;;
+    specs) cmd_specs "$@" ;;
+    spec-sources) cmd_spec_sources "$@" ;;
     spec-paths) cmd_spec_paths ;;
     spec-match) cmd_spec_match ;;
     checks) cmd_checks ;;

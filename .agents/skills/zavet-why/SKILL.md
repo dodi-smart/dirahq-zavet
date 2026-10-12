@@ -29,6 +29,16 @@ Answer from recorded knowledge: $ARGUMENTS
    shaped them) — open at most 3 documents, and check
    `git log --grep=<term>` trailers (`Why:`, `Constraint:`, `Refs:`, `Spec:`)
    for micro-decisions that never got a record.
+   **Source-backed specs.** When the question names a `<kind>:<id>` slug
+   (`openspec:add-csv-import`, `speckit:007-csv-import`, `bmad:epic-cart-rules`,
+   `superpowers:2026-09-18-...`), find its row in
+   `sh ".zavet/bin/zavet" specs --json` and open the files it
+   lists. Add the decisions that reference the slug (grep `.zavet/decisions/`
+   and `git log --grep='Spec:'`). With dira present, `dira zavet why <slug>`
+   adds the engaged and agent time spent under it. Cite the framework's text as
+   what the framework says, never as `verified` fact: these specs are
+   permanently unverified in zavet. Say when the row has `paths: none yet` or
+   an `unresolved` reason instead of papering over it.
 3. Follow the writing-style rule in the zavet skill: plain, active voice, one idea
    per sentence, no em dashes, no jargon nouns, sentence case.
    Answer with explicit citations (decision ids, spec slugs, commit shas).
