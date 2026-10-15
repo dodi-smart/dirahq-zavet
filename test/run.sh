@@ -2502,6 +2502,12 @@ sort "$TMP/incr.hist" >"$TMP/incr.hist.sorted"
 assert_file "incremental: the history memo holds the same rows as a full rebuild" "$TMP/full.hist.sorted" "$TMP/incr.hist.sorted"
 assert_file "incremental: specs --json is unchanged by the memo path" "$TMP/full.json" "$TMP/incr.json"
 assert_lacks "oid: a committed regular file never has a null oid" "$(cat "$TMP/full.json")" '"oid":null'
+# Stream paths are top-relative: run from a subdirectory, the oids must still
+# resolve (dira's daemon may invoke the plugin from any checkout directory).
+sub=$(cd "$R/src" && sh "$Z" specs --json)
+assert_has "oid: specs --json from a subdirectory still has blob oids" "$sub" '"oid":"'
+assert_lacks "oid: specs --json from a subdirectory has no null oid" "$sub" '"oid":null'
+assert_eq "oid: specs --json from a subdirectory matches the top" "$(cat "$TMP/full.json")" "$sub"
 # A stage failure must surface as a non-zero exit, never as an empty list.
 mkdir -p "$TMP/failbin"
 realawk=$(command -v awk)
