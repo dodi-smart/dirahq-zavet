@@ -122,6 +122,13 @@ as specs you cite. They are read-only to you here.
   Never write compliance percentages or "requirement satisfied" statements.
 - Adopt a new framework with /zavet:spec-adopt.
 
+A linked framework's standing rules (a Spec Kit constitution, OpenSpec project
+context) show up in session context under "Framework rules". Follow them like
+any project instruction, but they are the framework's claims: never copy them
+into `.zavet/RULES.md`, never edit them except through the framework's own
+commands, and if one conflicts with a standing rule or a recorded decision,
+stop and ask instead of picking one.
+
 ## Honoring guards
 
 - Editing a guarded path surfaces the decision once per session (the edit hook

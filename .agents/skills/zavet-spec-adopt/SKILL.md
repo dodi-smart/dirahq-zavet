@@ -39,8 +39,14 @@ The framework keeps authoring them.
      past a reason, and do not repair the framework's files to make a unit
      resolve.
    Most units will show `paths: none yet`. That is correct, see below.
-4. **Spec Kit constitution.** If `.specify/memory/constitution.md` exists, tell
-   the user it sits next to `.zavet/RULES.md` and that the two may overlap.
+4. **Framework rules.** Linking a framework also turns on its standing-rule
+   files: a Spec Kit constitution, OpenSpec's `config.yaml` context and rules,
+   BMAD's project context. Show the `rule-source` rows from step 3's
+   `spec-sources` report (or from `spec-sources --json`) as they are. Tell the
+   user that these rules now appear in session context next to
+   `.zavet/RULES.md`, attributed to their framework and unverified, and that
+   `rule-source: <kind> off` in `.zavet/config` switches one off. Report any
+   `unratified` or `legacy` state with its reason.
    **Do not import it, copy it or merge it.** Two files that both claim to be
    the standing rules go stale unnoticed. Leave the overlap to a human.
 5. **Explain the posture** in two or three plain sentences:

@@ -38,7 +38,10 @@ Initialize the zavet knowledge layer in this repository.
 
    Note: `init` also auto-detects spec frameworks (`openspec/`, `.specify/` with
    `specs/`, `_bmad/`, `docs/superpowers/`) and writes `spec-source:` lines to
-   `.zavet/config`. Mention what it found. To review or redo that on its own,
+   `.zavet/config`. Mention what it found. A linked framework also brings its
+   standing-rule files (a Spec Kit constitution, OpenSpec project context) into
+   session context, attributed and never imported; `zavet spec-sources` lists
+   them. To review or redo that on its own,
    or to see how the units resolve, use /zavet:spec-adopt.
 3. Activate the git-hook floor: `.zavet/bin/zavet hooks install`. It sets
    `core.hooksPath` and is what enforces the guard wall for anyone whose harness

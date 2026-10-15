@@ -18,6 +18,9 @@ ZAVET_MIN_DIRA="0.1.0"
 # Capability flag: `zavet specs --json` exists. A consumer checks it before
 # calling the command; absence means "older build, parse .zavet/specs/ files".
 ZAVET_SPECS_JSON=1
+# Capability flag: `zavet spec-sources --json` exists (spec-source and
+# rule-source rows). dira probes it before calling the command.
+ZAVET_SPEC_SOURCES_JSON=1
 
 usage() {
     cat <<'EOF'
@@ -56,12 +59,15 @@ Usage:
                               units). --json prints one JSON object per spec,
                               native and source-backed; requirement and task
                               text only with --with-text
-  zavet spec-sources [--detect] [--write] [--list]
-                              Report the spec-source: lines in .zavet/config
-                              and how many units each resolves. --detect lists
-                              frameworks found in the repo (OpenSpec, Spec Kit,
-                              BMAD, superpowers); --write declares the missing
-                              ones. Read-only over the sources themselves
+  zavet spec-sources [--detect] [--write] [--json] [--list]
+                              Report the spec-source: lines in .zavet/config,
+                              how many units each resolves, and the framework
+                              rule files (constitution, project context) they
+                              bring. --detect lists frameworks found in the repo
+                              (OpenSpec, Spec Kit, BMAD, superpowers); --write
+                              declares the missing ones; --json prints one
+                              object per source and rule source (metadata
+                              only). Read-only over the sources themselves
   zavet spec-paths            Print TAB-separated: slug, path glob (every spec)
   zavet checks                Print TAB-separated: id, label, command (every status)
   zavet spec-checks           Print TAB-separated: slug, label, command
@@ -243,13 +249,68 @@ ZAVET_MAX_PREFIX=6
 # empty (so defaults apply), a quoted value keeps its `#`, and otherwise an
 # inline ` # comment` is dropped. Same dialect as dira-core::zavet; the dialect
 # corpus pins it. Other strippers differ on purpose (sdlc_yaml_scalar and the
-# BMAD config read YAML/TOML values, spec_sources reads a whitespace list).
+# BMAD config read YAML/TOML values; `spec-source:` and `rule-source:` lines
+# are whitespace lists, see ZAVET_AWK_LIST).
 ZAVET_AWK_DECOMMENT='
 function decomment(s) {
     if (s ~ /^#/) return ""
     if (s !~ /^["'\'']/) sub(/[ \t]+#.*$/, "", s)
     return s
 }
+'
+
+# The whitespace-list dialect of `spec-source:` and `rule-source:` lines, and
+# the repo-relative path check both apply, as awk function text to prepend to
+# a program. A list is split on whitespace and never quoted, so unlike
+# decomment() a leading quote does not protect a `#`.
+ZAVET_AWK_LIST='
+function listval(s) {
+    sub(/^[ \t]+/, "", s)
+    if (s ~ /^#/) s = ""
+    sub(/[ \t]+#.*$/, "", s)
+    sub(/[ \t\r]+$/, "", s)
+    return s
+}
+# p without its leading ./ segments
+function relpath(p) {
+    while (p ~ /^\.\//) sub(/^\.\//, "", p)
+    return p
+}
+# true when relative path p is absolute, climbs out with .., holds a glob
+# character or reaches into .zavet
+function unsafe_rel(p) {
+    return p ~ /^\// || p ~ /(^|\/)\.\.(\/|$)/ || p ~ /[*?[]/ || p == ".zavet" || index(p, ".zavet/") == 1
+}
+'
+
+# JSON string encoding, as awk function text to prepend to a program that
+# calls jinit() in BEGIN. One copy, so `specs --json` and `spec-sources --json`
+# cannot escape differently. SOH (\001) stands for a newline inside a field: it
+# encodes as \n. Every other control character becomes \uXXXX.
+ZAVET_AWK_JSON='
+function jinit(   i) {
+    SOH = sprintf("%c", 1); TAB = sprintf("%c", 9); BS = sprintf("%c", 92); DQ = sprintf("%c", 34)
+    CTL = ""
+    for (i = 1; i <= 31; i++) CTL = CTL sprintf("%c", i)
+}
+function jstr(s,   out, i, c) {
+    out = ""
+    while (match(s, /["\\\001-\037]/)) {
+        i = RSTART; c = substr(s, i, 1)
+        out = out substr(s, 1, i - 1)
+        if (c == DQ) out = out BS DQ
+        else if (c == BS) out = out BS BS
+        else if (c == SOH) out = out BS "n"
+        else if (c == TAB) out = out BS "t"
+        else out = out sprintf("\\u%04x", index(CTL, c))
+        s = substr(s, i + 1)
+    }
+    return DQ out s DQ
+}
+function jnull(s) { return (s == "") ? "null" : jstr(s) }
+function jbool(b) { return b ? "true" : "false" }
+# a,b joined with a comma, no leading one when a is still empty
+function join(a, b) { return a (a == "" ? "" : ",") b }
 '
 
 # One `key: value` out of .zavet/config, or $3 when the file, the key or the
@@ -285,24 +346,19 @@ ZAVET_SPEC_KINDS=" openspec speckit bmad superpowers "
 spec_sources() { # $1 = root, $2 = "all" to report rejected lines too
     _ss_cf="$1/$ZAVET_DIR/config"
     [ -f "$_ss_cf" ] || return 0
-    awk -v kinds="$ZAVET_SPEC_KINDS" -v all="${2:-}" '
+    awk -v kinds="$ZAVET_SPEC_KINDS" -v all="${2:-}" "$ZAVET_AWK_LIST"'
         index($0, "spec-source:") != 1 { next }
         {
-            s = substr($0, 13)
-            sub(/^[ \t]+/, "", s)
-            if (s ~ /^#/) s = ""
-            sub(/[ \t]+#.*$/, "", s)
-            sub(/[ \t\r]+$/, "", s)
-            n = split(s, f, /[ \t]+/)
+            n = split(listval(substr($0, 13)), f, /[ \t]+/)
             kind = f[1]; root = f[2]
             globs = ""
             for (i = 3; i <= n; i++) globs = globs (globs == "" ? "" : " ") f[i]
-            while (root ~ /^\.\//) sub(/^\.\//, "", root)
+            root = relpath(root)
             sub(/\/+$/, "", root)
             st = "ok"
             if (n < 2 || kind == "" || root == "") st = "incomplete"
             else if (index(kinds, " " kind " ") == 0) st = "unknown-kind"
-            else if (root == "." || root ~ /[*?[]/ || root ~ /^\// || root ~ /(^|\/)\.\.(\/|$)/ || root == ".zavet" || index(root, ".zavet/") == 1) st = "invalid-root"
+            else if (root == "." || unsafe_rel(root)) st = "invalid-root"
             if (st == "ok") {
                 if ((kind SUBSEP root) in seen) next
                 seen[kind SUBSEP root] = 1
@@ -1834,8 +1890,8 @@ sdlc_root() { # $1 = kind, $2 = top, $3 = declared root
 }
 
 # sdlc_report: the extra `spec-sources` report rows a kind owns (superpowers:
-# plans that name no design; Spec Kit: the constitution, reported next to
-# RULES.md and never imported). $3 is the effective root, unused by speckit.
+# plans that name no design; Spec Kit: the constitution alias row, see
+# rule_report). $3 is the effective root, unused by speckit.
 sdlc_report() { # $1 = kind, $2 = top, $3 = effective root
     case "$ZAVET_SPEC_KINDS" in
         *" $1 "*) ;;
@@ -1844,8 +1900,10 @@ sdlc_report() { # $1 = kind, $2 = top, $3 = effective root
     case "$1" in
         superpowers) sdlc_unpaired_plans "$2" "$3" | sed 's/^/unpaired-plan\t/' ;;
         speckit)
+            # Kept for one release as an alias of the `rule-source
+            # speckit-constitution` row, for scripts that grep for it.
             if [ -f "$2/.specify/memory/constitution.md" ]; then
-                printf 'constitution\t.specify/memory/constitution.md\treported next to %s/RULES.md, never imported\n' "$ZAVET_DIR"
+                printf 'constitution\t.specify/memory/constitution.md\tsee rule-source speckit-constitution; never imported into %s/RULES.md\n' "$ZAVET_DIR"
             fi
             ;;
     esac
@@ -2486,12 +2544,10 @@ sdlc_parse() { # $1 = parse (0|1), $2 = text (0|1); stdin = manifest; cwd = top
 #   tsv      slug<TAB>origin<TAB>confidence<TAB>date<TAB>title (source units)
 #   ctx      slug<TAB>title<TAB>done<TAB>total for units still open
 sdlc_emit() { # $1 mode, $2 text (0|1), $3 hist file, $4 oid file, $5 accretion file
-    awk -v mode="$1" -v text="$2" -v histf="${3:-}" -v oidf="${4:-}" -v accf="${5:-}" '
+    awk -v mode="$1" -v text="$2" -v histf="${3:-}" -v oidf="${4:-}" -v accf="${5:-}" "$ZAVET_AWK_JSON"'
     BEGIN {
         FS = "\t"
-        SOH = sprintf("%c", 1); TAB = sprintf("%c", 9); BS = sprintf("%c", 92); DQ = sprintf("%c", 34)
-        CTL = ""
-        for (i = 1; i <= 31; i++) CTL = CTL sprintf("%c", i)
+        jinit()
         nu = 0; nroots = 0
         if (histf != "") {
             while ((getline l < histf) > 0) {
@@ -2510,24 +2566,6 @@ sdlc_emit() { # $1 mode, $2 text (0|1), $3 hist file, $4 oid file, $5 accretion 
             close(oidf)
         }
     }
-    function jstr(s,   out, i, c) {
-        out = ""
-        while (match(s, /["\\\001-\037]/)) {
-            i = RSTART; c = substr(s, i, 1)
-            out = out substr(s, 1, i - 1)
-            if (c == DQ) out = out BS DQ
-            else if (c == BS) out = out BS BS
-            else if (c == SOH) out = out BS "n"
-            else if (c == TAB) out = out BS "t"
-            else out = out sprintf("\\u%04x", index(CTL, c))
-            s = substr(s, i + 1)
-        }
-        return DQ out s DQ
-    }
-    function jnull(s) { return (s == "") ? "null" : jstr(s) }
-    function jbool(b) { return b ? "true" : "false" }
-    # a,b joined with a comma, no leading one when a is still empty
-    function join(a, b) { return a (a == "" ? "" : ",") b }
     # State predicates. A closed unit (archived or removed) no longer claims
     # live work; a live one is also resolved. The paths view still lists the
     # paths accreted by a closed unit: its own commits touched them, so they
@@ -3165,6 +3203,417 @@ sdlc_ctx() { # $1 = root, $2 = "hook" | "file"
     printf '\nCite the unit you work under with a `Spec: <kind>:<id>` trailer on every commit (comma-separate several). The spec-maintenance rule above covers %s/specs/ only: these units belong to their framework, so change their files only through its own commands, never to make a spec agree with your code.\n' "$ZAVET_DIR"
 }
 
+# -- rule sources ---------------------------------------------------------------
+#
+# A framework's standing rules (the Spec Kit constitution, OpenSpec's
+# config.yaml context and rules, BMAD's project context) sit next to
+# .zavet/RULES.md and are never imported into it: two files that both claim to
+# be the standing rules go stale unnoticed. They follow the spec sources, so
+# linking a framework turns its rule files on at their default paths with no
+# extra step. .zavet/config can switch them off or point one elsewhere:
+#
+#   rule-sources: off                every rule source off
+#   rule-source: <kind> off          one kind off
+#   rule-source: <kind> <path>       a non-default path for one kind
+#   rule-source-max-lines: <n>       per-source cap in session context
+#
+# A rule file is read-only and untrusted, like a source root: zavet never
+# writes it, never follows a symlink out of the repo, and a file it cannot
+# parse reports `unresolved` with the reason instead of a guess. Its claims are
+# the framework's, so they are always `verified: false`.
+#
+# Rows travel as TSV through `read`, where a tab is IFS whitespace and empty
+# fields would collapse: every empty field is written as "-".
+
+ZAVET_RULE_KINDS=" speckit-constitution openspec-config openspec-project-md bmad-agents-block bmad-project-context "
+ZAVET_RULE_MAX_LINES=60
+MARK_BMAD_START="<!-- bmad:context -->"
+MARK_BMAD_END="<!-- /bmad:context -->"
+
+# The default rule files of the frameworks on stdin (kind<TAB>root, as
+# spec_sources or sdlc_detect print them), as D<TAB>kind<TAB>path for every one
+# that exists. Stat and grep only.
+rule_defaults() { # $1 = top; stdin = kind<TAB>root
+    _rd_tab=$(printf '\t')
+    while IFS="$_rd_tab" read -r _rd_kind _rd_root _rd_rest; do
+        case "$_rd_kind" in
+            speckit)
+                if [ -f "$1/.specify/memory/constitution.md" ]; then
+                    printf 'D\tspeckit-constitution\t.specify/memory/constitution.md\n'
+                fi
+                ;;
+            openspec)
+                # A config.yaml with neither key holds no rules, only the schema.
+                if [ -f "$1/$_rd_root/config.yaml" ] && grep -Eq '^(context|rules):' "$1/$_rd_root/config.yaml" 2>/dev/null; then
+                    printf 'D\topenspec-config\t%s/config.yaml\n' "$_rd_root"
+                fi
+                if [ -f "$1/$_rd_root/project.md" ]; then
+                    printf 'D\topenspec-project-md\t%s/project.md\n' "$_rd_root"
+                fi
+                ;;
+            bmad)
+                if [ -f "$1/AGENTS.md" ] && grep -qF "$MARK_BMAD_START" "$1/AGENTS.md" 2>/dev/null; then
+                    printf 'D\tbmad-agents-block\tAGENTS.md\n'
+                fi
+                _rd_store=$(bmad_store "$1" "$_rd_root")
+                if [ -f "$1/$_rd_store/project-context.md" ]; then
+                    printf 'D\tbmad-project-context\t%s/project-context.md\n' "$_rd_store"
+                fi
+                ;;
+        esac
+    done
+    return 0
+}
+
+# The `rule-sources:` / `rule-source:` lines of .zavet/config, as
+# O<TAB>kind<TAB>value (O<TAB>*<TAB>off for the global switch). The value is
+# empty for a line that names no path.
+rule_overrides() { # $1 = top
+    _ro_cf="$1/$ZAVET_DIR/config"
+    [ -f "$_ro_cf" ] || return 0
+    awk "$ZAVET_AWK_LIST"'
+        index($0, "rule-sources:") == 1 {
+            if (listval(substr($0, 14)) == "off") print "O\t*\toff"
+            next
+        }
+        index($0, "rule-source:") == 1 {
+            n = split(listval(substr($0, 13)), f, /[ \t]+/)
+            print "O\t" ((n >= 1 && f[1] != "") ? f[1] : "-") "\t" (n >= 2 ? f[2] : "")
+        }
+    ' "$_ro_cf"
+}
+
+# Defaults (D rows) and overrides (O rows) on stdin, merged into one row per
+# kind, in ZAVET_RULE_KINDS order: state<TAB>kind<TAB>path<TAB>source<TAB>reason,
+# state being ok | off | unresolved (reason "-" unless unresolved). The first
+# default and the first override of a kind win.
+rule_merge() {
+    awk -v kinds="$ZAVET_RULE_KINDS" "$ZAVET_AWK_LIST"'
+        BEGIN { FS = "\t"; nk = split(kinds, K, " ") }
+        $1 == "D" { if (!($2 in dp)) dp[$2] = $3; next }
+        $1 == "O" && $2 == "*" { alloff = 1; next }
+        $1 == "O" {
+            if (index(kinds, " " $2 " ") == 0) { bad[++nb] = "unresolved\t" $2 "\t" ($3 == "" ? "-" : $3) "\toverride\tunknown rule-source kind"; next }
+            if (!($2 in ov)) ov[$2] = $3
+            next
+        }
+        END {
+            for (i = 1; i <= nk; i++) {
+                k = K[i]; st = "ok"; src = "default"; why = "-"
+                if (k in ov) {
+                    v = ov[k]
+                    if (v == "off") {
+                        if (!(k in dp)) continue
+                        st = "off"; p = dp[k]
+                    } else if (v == "") {
+                        st = "unresolved"; why = "rule-source line names no path"; p = "-"; src = "override"
+                    } else {
+                        p = relpath(v); src = "override"
+                        if (unsafe_rel(p)) { st = "unresolved"; why = "invalid path" }
+                    }
+                } else if (k in dp) p = dp[k]
+                else continue
+                if (alloff && st == "ok") st = "off"
+                print st "\t" k "\t" p "\t" src "\t" why
+            }
+            for (i = 1; i <= nb; i++) print bad[i]
+        }
+    '
+}
+
+# Every rule source of the frameworks that $2 lists (spec_sources: the
+# declared ones; sdlc_detect: the ones present), as rule_merge rows.
+rule_merged() { # $1 = top, $2 = spec_sources | sdlc_detect
+    {
+        "$2" "$1" | rule_defaults "$1"
+        rule_overrides "$1"
+    } | rule_merge
+}
+
+# ok when repo-relative $2 is a regular file inside the repo; otherwise the
+# state<TAB>reason it reports as: file-missing, or unresolved for a symlink or
+# a directory that resolves outside the repo.
+rule_file_status() { # $1 = top, $2 = path
+    if [ -L "$1/$2" ]; then
+        printf 'unresolved\tsymlink or path outside the repo\n'
+    elif [ ! -f "$1/$2" ]; then
+        printf 'file-missing\tfile missing\n'
+    elif sdlc_inside "$1" "$(dirname -- "$2")"; then
+        printf 'ok\n'
+    else
+        printf 'unresolved\tsymlink or path outside the repo\n'
+    fi
+}
+
+# Per-kind presentation, as variables: _rk_label (the context payload name),
+# _rk_quote (1 when the hook form quotes the text: rule_body parses that kind)
+# and _rk_history (1 when audit compares the file's history with RULES.md).
+# Default paths stay in rule_defaults: each depends on the framework root and
+# on what the file holds.
+rule_kind() { # $1 = kind
+    _rk_quote=0
+    _rk_history=1
+    case "$1" in
+        speckit-constitution) _rk_label='Spec Kit constitution'; _rk_quote=1 ;;
+        openspec-config) _rk_label='OpenSpec config'; _rk_quote=1 ;;
+        openspec-project-md) _rk_label='OpenSpec project.md' ;;
+        # zavet regenerates its own block of AGENTS.md, so that file's history
+        # says nothing about the BMAD block inside it.
+        bmad-agents-block) _rk_label='BMAD project context, already in AGENTS.md'; _rk_history=0 ;;
+        bmad-project-context) _rk_label='BMAD project-context.md' ;;
+        *) _rk_label=$1 ;;
+    esac
+}
+
+# One YAML block scalar (`key: |` or `key: >`; a plain one-line value too), with
+# its indentation removed. Ends at the next line that starts in column 0.
+yaml_block_scalar() { # $1 = file, $2 = key
+    [ -f "$1" ] && [ ! -L "$1" ] || return 0
+    awk -v k="$2" '
+        !inb && index($0, k ":") == 1 {
+            s = substr($0, length(k) + 2)
+            sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s)
+            if (s != "" && s !~ /^[|>][-+0-9]*$/) {
+                gsub(/^["'\'']|["'\'']$/, "", s); print s; exit
+            }
+            inb = 1; next
+        }
+        !inb { next }
+        /^[^ \t\r]/ { exit }
+        {
+            sub(/\r$/, "")
+            if ($0 ~ /^[ \t]*$/) { blank++; next }
+            if (ind == "") { match($0, /^[ \t]*/); ind = RLENGTH }
+            while (blank > 0) { print ""; blank-- }
+            print substr($0, ind + 1)
+        }
+    ' "$1" 2>/dev/null
+}
+
+# A YAML map of lists one level deep (OpenSpec `rules:`, keyed by artifact id),
+# as key<TAB>item for every `- item`.
+yaml_map_lists() { # $1 = file, $2 = key
+    [ -f "$1" ] && [ ! -L "$1" ] || return 0
+    awk -v k="$2" '
+        !inb && index($0, k ":") == 1 { inb = 1; next }
+        !inb { next }
+        /^[^ \t\r#]/ { exit }
+        {
+            sub(/\r$/, "")
+            if ($0 ~ /^[ \t]+-[ \t]/) {
+                s = $0; sub(/^[ \t]+-[ \t]+/, "", s); sub(/[ \t]+$/, "", s)
+                gsub(/^["'\'']|["'\'']$/, "", s)
+                if (art != "" && s != "") print art "\t" s
+            } else if ($0 ~ /^[ \t]+[^ \t#][^:]*:[ \t]*$/) {
+                art = $0; sub(/^[ \t]+/, "", art); sub(/:[ \t]*$/, "", art)
+            }
+        }
+    ' "$1" 2>/dev/null
+}
+
+# The metadata of one rule file:
+#   state<TAB>version<TAB>ratified<TAB>last_amended<TAB>rule_count<TAB>reason
+# state being ok | unratified | legacy | unresolved. Empty fields are "-".
+rule_meta() { # $1 = top, $2 = kind, $3 = path
+    _rm_f="$1/$3"
+    case "$2" in
+        speckit-constitution)
+            awk '
+                function field(label,   s) {
+                    if (!match($0, "\\*\\*" label "\\*\\*:?[ \t]*[^ \t|]+")) return ""
+                    s = substr($0, RSTART, RLENGTH)
+                    sub("^\\*\\*" label "\\*\\*:?[ \t]*", "", s)
+                    return (s ~ /^[0-9A-Za-z][0-9A-Za-z.+-]*$/ && length(s) <= 64) ? s : ""
+                }
+                function dash(s) { return s == "" ? "-" : s }
+                NF { any = 1 }
+                /\*\*Version\*\*/ { v = field("Version"); r = field("Ratified"); a = field("Last Amended") }
+                /^###[ \t]+([IVXLC]+|[0-9]+)\.[ \t]/ { n++ }
+                /\[[A-Z][A-Z0-9]*_[A-Z0-9_]+\]/ || /TODO\(/ { ph = 1 }
+                /Sync Impact Report/ { sir = 1 }
+                END {
+                    if (!any) { print "unresolved\t-\t-\t-\t-\tempty file"; exit }
+                    st = "ok"; why = "-"
+                    if (sir) { st = "unratified"; why = "Sync Impact Report comment is still committed" }
+                    else if (ph) { st = "unratified"; why = "placeholder tokens remain" }
+                    print st "\t" dash(v) "\t" dash(r) "\t" dash(a) "\t" (n + 0) "\t" why
+                }
+            ' "$_rm_f" 2>/dev/null || printf 'unresolved\t-\t-\t-\t-\tunreadable\n'
+            ;;
+        openspec-config)
+            _rm_ctx=$(yaml_block_scalar "$_rm_f" context)
+            _rm_n=$(yaml_map_lists "$_rm_f" rules | awk 'END { print NR }')
+            _rm_v=$(sdlc_yaml_scalar "$_rm_f" version)
+            [ -n "$_rm_v" ] || _rm_v=-
+            if [ -z "$_rm_ctx" ] && [ "$_rm_n" -eq 0 ]; then
+                printf 'unresolved\t%s\t-\t-\t0\tno context or rules\n' "$_rm_v"
+            else
+                printf 'ok\t%s\t-\t-\t%s\t-\n' "$_rm_v" "$_rm_n"
+            fi
+            ;;
+        openspec-project-md)
+            printf 'legacy\t-\t-\t-\t-\tdeprecated by OpenSpec: move it into %s/config.yaml context\n' "$(dirname -- "$3")"
+            ;;
+        bmad-agents-block)
+            awk -v s="$MARK_BMAD_START" -v e="$MARK_BMAD_END" '
+                $0 == s || index($0, s) == 1 { inb = 1; seen = 1; next }
+                inb && index($0, e) == 1 { inb = 0; closed = 1; exit }
+                inb && NF { lines++ }
+                inb && /^[ \t]*[-*][ \t]/ { n++ }
+                END {
+                    if (!seen) print "unresolved\t-\t-\t-\t-\tno bmad:context block"
+                    else if (!closed) print "unresolved\t-\t-\t-\t-\tbmad:context block has no end marker"
+                    else if (!lines) print "unresolved\t-\t-\t-\t0\tempty bmad:context block"
+                    else print "ok\t-\t-\t-\t" (n + 0) "\t-"
+                }
+            ' "$_rm_f" 2>/dev/null || printf 'unresolved\t-\t-\t-\t-\tunreadable\n'
+            ;;
+        bmad-project-context)
+            printf 'legacy\t-\t-\t-\t-\tdeprecated by BMAD: bmad-project-context now writes the AGENTS.md bmad:context block\n'
+            ;;
+        *) printf 'unresolved\t-\t-\t-\t-\tunknown rule-source kind\n' ;;
+    esac
+}
+
+# Every rule source with its metadata:
+#   kind path source state version ratified last_amended rule_count reason safe
+# (TAB-separated, "-" for empty). state adds file-missing to rule_meta's and
+# rule_merge's; safe is 1 when the path is a regular file inside the repo
+# (rule_file_status ok), whatever the state. Only an ok row is ever opened.
+rule_rows() { # $1 = top
+    _rw_tab=$(printf '\t')
+    rule_merged "$1" spec_sources | while IFS="$_rw_tab" read -r _rw_st _rw_kind _rw_path _rw_src _rw_why; do
+        _rw_fs=-
+        [ "$_rw_path" = - ] || _rw_fs=$(rule_file_status "$1" "$_rw_path")
+        _rw_safe=0
+        [ "$_rw_fs" != ok ] || _rw_safe=1
+        if [ "$_rw_st" != ok ]; then
+            _rw_meta="$_rw_st	-	-	-	-	$_rw_why"
+        elif [ "$_rw_safe" = 1 ]; then
+            _rw_meta=$(rule_meta "$1" "$_rw_kind" "$_rw_path")
+        else
+            _rw_meta="${_rw_fs%%"$_rw_tab"*}	-	-	-	-	${_rw_fs#*"$_rw_tab"}"
+        fi
+        printf '%s\t%s\t%s\t%s\t%s\n' "$_rw_kind" "$_rw_path" "$_rw_src" "$_rw_meta" "$_rw_safe"
+    done
+}
+
+# The text a rule file contributes to session context. Spec Kit loses its
+# leading H1 and the Sync Impact Report comment (review scratch, not rules);
+# OpenSpec contributes its context and rules keys only.
+rule_body() { # $1 = top, $2 = kind, $3 = path
+    case "$2" in
+        speckit-constitution)
+            awk '
+                incom {
+                    buf = buf "\n" $0
+                    if (index($0, "-->")) { incom = 0; if (buf !~ /Sync Impact Report/) out(buf) }
+                    next
+                }
+                index($0, "<!--") && !index($0, "-->") { incom = 1; buf = $0; next }
+                /^# / && !started { started = 1; next }
+                NF == 0 && !body { next }
+                { body = 1; started = 1; print }
+                function out(s) { body = 1; print s }
+            ' "$1/$3"
+            ;;
+        openspec-config)
+            _rb_ctx=$(yaml_block_scalar "$1/$3" context)
+            if [ -n "$_rb_ctx" ]; then
+                printf 'context:\n%s\n' "$_rb_ctx"
+            fi
+            _rb_rules=$(yaml_map_lists "$1/$3" rules)
+            if [ -n "$_rb_rules" ]; then
+                printf 'rules:\n'
+                printf '%s\n' "$_rb_rules" | awk -F '\t' '{ print "- " $1 ": " $2 }'
+            fi
+            ;;
+    esac
+}
+
+# The "### Framework rules" section of the context payload. The hook form
+# quotes the Spec Kit and OpenSpec text, capped per source; the generated
+# files (AGENTS.md, .grok rules) get pointers only, so a constitution
+# amendment never leaves a stale committed copy behind (the same split as
+# sdlc_ctx). BMAD's block is a pointer in both: the harness already loads
+# AGENTS.md. Anything off, missing or unresolved is skipped silently.
+rule_ctx() { # $1 = root, $2 = "hook" | "file"
+    _rc_rows=$(rule_rows "$1")
+    [ -n "$_rc_rows" ] || return 0
+    _rc_max=$(config_get "$1" rule-source-max-lines "$ZAVET_RULE_MAX_LINES")
+    case "$_rc_max" in
+        '' | *[!0-9]*) _rc_max=$ZAVET_RULE_MAX_LINES ;;
+    esac
+    _rc_tab=$(printf '\t')
+    # The case patterns below carry a leading "(": inside $( ) an unbalanced
+    # ")" ends the substitution early in some shells.
+    _rc_out=$(printf '%s\n' "$_rc_rows" | while IFS="$_rc_tab" read -r _rc_k _rc_p _rc_src _rc_st _rc_v _rc_rat _rc_am _rc_n _rc_why _rc_safe; do
+        case "$_rc_st" in
+            (ok | unratified | legacy) ;;
+            (*) continue ;;
+        esac
+        rule_kind "$_rc_k"
+        _rc_line="- $_rc_p ($_rk_label"
+        [ "$_rc_v" = - ] || _rc_line="$_rc_line, v$_rc_v"
+        [ "$_rc_am" = - ] || _rc_line="$_rc_line, amended $_rc_am"
+        [ "$_rc_st" != unratified ] || _rc_line="$_rc_line, not ratified yet"
+        [ "$_rc_st" != legacy ] || _rc_line="$_rc_line; $_rc_why"
+        printf '%s)\n' "$_rc_line"
+        [ "$2" = hook ] || continue
+        [ "$_rc_max" -gt 0 ] || continue
+        [ "$_rk_quote" = 1 ] || continue
+        printf '\n'
+        rule_body "$1" "$_rc_k" "$_rc_p" | awk -v max="$_rc_max" -v p="$_rc_p" '
+            NR <= max { print ($0 == "" ? ">" : "> " $0); next }
+            { more++ }
+            END { if (more) print "> … truncated after " max " lines; read " p " for the rest" }
+        '
+        printf '\n'
+    done)
+    [ -n "$_rc_out" ] || return 0
+    printf '### Framework rules (read-only: owned by their framework, not zavet'\''s standing rules)\n\n'
+    printf '%s\n\n' "$_rc_out"
+    printf 'These rules belong to their framework and zavet has not verified them. If one conflicts with a standing rule or a recorded decision, stop and ask. Do not pick one silently, and do not edit either file to make them agree.\n\n'
+}
+
+# `zavet audit` rows for rule sources. Facts only: whether two sets of rules
+# overlap or conflict is a judgement, left to the /zavet:audit command.
+rule_audit() { # $1 = root
+    _ra_tab=$(printf '\t')
+    _ra_rules=$(git -C "$1" log -1 --format=%H -- "$ZAVET_DIR/RULES.md" 2>/dev/null)
+    rule_rows "$1" | while IFS="$_ra_tab" read -r _ra_k _ra_p _ra_src _ra_st _ra_v _ra_rat _ra_am _ra_n _ra_why _ra_safe; do
+        case "$_ra_st" in
+            off) continue ;;
+            unresolved | file-missing)
+                printf 'rule-source-unresolved\t%s\t%s\t%s\n' "$_ra_k" "$_ra_p" "$_ra_why"
+                continue
+                ;;
+            unratified) printf 'rule-source-unratified\t%s\t%s\n' "$_ra_k" "$_ra_p" ;;
+            legacy) printf 'rule-source-legacy\t%s\t%s\t%s\n' "$_ra_k" "$_ra_p" "$_ra_why" ;;
+        esac
+        rule_kind "$_ra_k"
+        [ "$_rk_history" = 1 ] || continue
+        [ -n "$_ra_rules" ] || continue
+        _ra_last=$(git -C "$1" log -1 --format=%H -- "$_ra_p" 2>/dev/null)
+        [ -n "$_ra_last" ] || continue
+        [ "$_ra_last" != "$_ra_rules" ] || continue
+        git -C "$1" merge-base --is-ancestor "$_ra_rules" "$_ra_last" 2>/dev/null || continue
+        printf 'rule-source-newer-than-rules\t%s\t%s\t%s\n' "$_ra_k" "$_ra_p" "$(git -C "$1" rev-parse --short=7 "$_ra_last")"
+    done
+}
+
+# `spec-sources` report rows for rule sources:
+#   rule-source<TAB>kind<TAB>path<TAB>state<TAB>version<TAB>last_amended
+rule_report() { # $1 = top
+    rule_rows "$1" | awk -F '\t' '{ print "rule-source\t" $1 "\t" $2 "\t" $4 "\t" $5 "\t" $7 }'
+}
+
+# `spec-sources --detect` rows for the rule files the detected frameworks bring,
+# with whether .zavet/config leaves them on.
+rule_detect() { # $1 = top
+    rule_merged "$1" sdlc_detect | awk -F '\t' '$1 == "ok" || $1 == "off" { print "rule-source\t" $2 "\t" $3 "\t" ($1 == "ok" ? "on" : "off") }'
+}
+
 # -- commands -----------------------------------------------------------------
 
 # Frameworks present in the repo, as kind<TAB>root. Stat only.
@@ -3186,41 +3635,121 @@ sdlc_config_append() { # $1 = config path, $2 = kind, $3 = root
     printf 'spec-source: %s %s\n' "$2" "$3" >>"$1"
 }
 
+# The `spec-sources` row of every declared source, with its unit counts when
+# it resolves. With "report" as $2, each resolving source is followed by the
+# extra rows its kind owns (sdlc_report). Read-only.
+spec_source_rows() { # $1 = top, $2 = "report" for the per-kind rows too
+    _sr_top=$1
+    _sr_rep=${2:-}
+    _sr_tab=$(printf '\t')
+    _sr_stream="${TMPDIR:-/tmp}/zavet-ss.$$"
+    sdlc_stream "$_sr_top" 0 >"$_sr_stream"
+    spec_sources "$_sr_top" all | while IFS="$_sr_tab" read -r _sr_st _sr_kind _sr_root _sr_globs; do
+        if [ "$_sr_st" != ok ]; then
+            printf 'source-%s\t%s\t%s\n' "$_sr_st" "$_sr_kind" "$_sr_root"
+            continue
+        fi
+        _sr_eff=$(sdlc_root "$_sr_kind" "$_sr_top" "$_sr_root")
+        if [ ! -d "$_sr_top/$_sr_eff" ]; then
+            printf 'source-root-missing\t%s\t%s\n' "$_sr_kind" "$_sr_root"
+            continue
+        fi
+        awk -F '\t' -v k="$_sr_kind" -v r="$_sr_eff" -v g="$_sr_globs" '
+            $1 == "U" && $3 == k && $5 == r { n++; if ($7 == "unresolved") bad++ }
+            END { printf "source\t%s\t%s\t%d\t%d\t%s\n", k, r, n, bad, g }
+        ' "$_sr_stream"
+        [ -z "$_sr_rep" ] || sdlc_report "$_sr_kind" "$_sr_top" "$_sr_eff"
+    done
+    rm -f "$_sr_stream"
+}
+
+# The `spec-sources` report: every declared source, then the rule sources.
+spec_sources_report() { # $1 = top
+    spec_source_rows "$1" report
+    rule_report "$1"
+}
+
+# `spec-sources --json`: one JSON object per line, for dira. Spec-source rows
+# carry the source and its unit counts; rule-source rows carry metadata only
+# (never the rules' text), with the working-tree blob oid as a fingerprint.
+# Everything is built first, so a failing stage prints nothing at all.
+spec_sources_json() { # $1 = top
+    _sj_top=$1
+    _sj_tmp="${TMPDIR:-/tmp}/zavet-sj.$$"
+    rm -rf "$_sj_tmp"
+    mkdir "$_sj_tmp" 2>/dev/null || return 1
+    _sj_rc=0
+    spec_source_rows "$_sj_top" >"$_sj_tmp/specs" || _sj_rc=1
+    rule_rows "$_sj_top" >"$_sj_tmp/rules" || _sj_rc=1
+    # One hash-object for every safe rule file, through sdlc_oids' F rows. It
+    # runs from the top, where the repo-relative paths resolve.
+    awk -F '\t' '$10 == 1 { print "F\t-\t" $2 }' "$_sj_tmp/rules" >"$_sj_tmp/stream" || _sj_rc=1
+    (cd -- "$_sj_top" && sdlc_oids "$_sj_top" "$_sj_tmp/stream" "$_sj_tmp/oid") || _sj_rc=1
+    if [ "$_sj_rc" -ne 0 ]; then
+        rm -rf "$_sj_tmp"
+        return 1
+    fi
+    _sj_out=$(
+        {
+            awk '{ print "S\t" $0 }' "$_sj_tmp/specs"
+            # the safe column becomes the oid ("-" when there is none)
+            awk 'BEGIN { FS = OFS = "\t" }
+                FILENAME == ARGV[1] { o[$1] = $2; next }
+                { $10 = ($10 == 1 && ($2 in o)) ? o[$2] : "-"; print "R", $0 }
+            ' "$_sj_tmp/oid" "$_sj_tmp/rules"
+        } | awk "$ZAVET_AWK_JSON"'
+            BEGIN { FS = "\t"; jinit() }
+            function d(s) { return s == "-" ? "" : s }
+            # S source kind root units unresolved globs | S source-<state> kind root
+            $1 == "S" {
+                st = ($2 == "source") ? "ok" : substr($2, 8)
+                g = ""
+                if ($2 == "source" && $7 != "") {
+                    n = split($7, gl, " ")
+                    for (i = 1; i <= n; i++) g = join(g, jstr(gl[i]))
+                }
+                print "{\"v\":1,\"type\":\"spec-source\",\"kind\":" jnull(d($3)) ",\"root\":" jnull(d($4)) \
+                    ",\"globs\":[" g "],\"state\":" jstr(st) \
+                    ",\"units\":" ($2 == "source" ? $5 + 0 : "null") ",\"unresolved\":" ($2 == "source" ? $6 + 0 : "null") "}"
+                next
+            }
+            # R kind path source state version ratified amended count reason oid
+            $1 == "R" {
+                print "{\"v\":1,\"type\":\"rule-source\",\"kind\":" jstr($2) ",\"path\":" jnull(d($3)) \
+                    ",\"source\":" jstr($4) ",\"enabled\":" jbool($5 != "off") ",\"oid\":" jnull(d($11)) \
+                    ",\"version\":" jnull(d($6)) ",\"ratified\":" jnull(d($7)) ",\"lastAmended\":" jnull(d($8)) \
+                    ",\"ruleCount\":" ($9 ~ /^[0-9]+$/ ? $9 + 0 : "null") \
+                    ",\"origin\":\"external\",\"verified\":false,\"state\":" jstr($5) ",\"reason\":" jnull(d($10)) "}"
+            }
+        ' | LC_ALL=C sort
+    ) || _sj_rc=1
+    rm -rf "$_sj_tmp"
+    [ "$_sj_rc" -eq 0 ] || return 1
+    [ -z "$_sj_out" ] || printf '%s\n' "$_sj_out"
+}
+
 cmd_spec_sources() {
     _ds_detect=0
     _ds_write=0
+    _ds_json=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --detect) _ds_detect=1; shift ;;
             --write) _ds_write=1; shift ;;
+            --json) _ds_json=1; shift ;;
             --list) spec_sources "$(zavet_root)"; return 0 ;;
-            *) die "usage: zavet spec-sources [--detect] [--write] [--list]" ;;
+            *) die "usage: zavet spec-sources [--detect] [--write] [--json] [--list]" ;;
         esac
     done
     [ "$_ds_write" -eq 0 ] || _ds_detect=1
+    [ "$_ds_json" -eq 0 ] || [ "$_ds_detect" -eq 0 ] || die "--json cannot be combined with --detect or --write"
     _ds_top=$(repo_toplevel) || die "not inside a git repository"
+    if [ "$_ds_json" -eq 1 ]; then
+        spec_sources_json "$(zavet_root)"
+        return $?
+    fi
     if [ "$_ds_detect" -eq 0 ]; then
-        _ds_top=$(zavet_root)
-        _ds_tab=$(printf '\t')
-        _ds_stream="${TMPDIR:-/tmp}/zavet-ss.$$"
-        sdlc_stream "$_ds_top" 0 >"$_ds_stream"
-        spec_sources "$_ds_top" all | while IFS="$_ds_tab" read -r _ds_st _ds_kind _ds_root _ds_globs; do
-            if [ "$_ds_st" != ok ]; then
-                printf 'source-%s\t%s\t%s\n' "$_ds_st" "$_ds_kind" "$_ds_root"
-                continue
-            fi
-            _ds_eff=$(sdlc_root "$_ds_kind" "$_ds_top" "$_ds_root")
-            if [ ! -d "$_ds_top/$_ds_eff" ]; then
-                printf 'source-root-missing\t%s\t%s\n' "$_ds_kind" "$_ds_root"
-                continue
-            fi
-            awk -F '\t' -v k="$_ds_kind" -v r="$_ds_eff" -v g="$_ds_globs" '
-                $1 == "U" && $3 == k && $5 == r { n++; if ($7 == "unresolved") bad++ }
-                END { printf "source\t%s\t%s\t%d\t%d\t%s\n", k, r, n, bad, g }
-            ' "$_ds_stream"
-            sdlc_report "$_ds_kind" "$_ds_top" "$_ds_eff"
-        done
-        rm -f "$_ds_stream"
+        spec_sources_report "$(zavet_root)"
         return 0
     fi
     _ds_cfg="$_ds_top/$ZAVET_DIR/config"
@@ -3248,7 +3777,10 @@ cmd_spec_sources() {
             printf 'detect\t%s\t%s\tnew\n' "$_ds_kind" "$_ds_root"
         fi
     done
-    # The constitution is reported whether or not Spec Kit was detected.
+    # The rule files each detected framework brings, and whether
+    # .zavet/config leaves them on. The constitution alias row is reported
+    # whether or not Spec Kit was detected.
+    rule_detect "$_ds_top"
     sdlc_report speckit "$_ds_top" ""
     return 0
 }
@@ -3862,6 +4394,10 @@ EOF
     # files, plus the advisory drift classes. Native specs never reach here.
     sdlc_audit "$root"
 
+    # --- framework rule sources: facts about the rule files the linked
+    # frameworks bring, never a judgement about what they say.
+    rule_audit "$root"
+
     # --- cross-harness health: whether the knowledge layer actually reaches
     # agents that are not Claude Code, and whether the enforcement floor is
     # live. Every failure here is silent by nature — a stale decision index
@@ -4157,6 +4693,7 @@ ctx_payload() { # $1 = root, $2 = "hook" | "file"
              { skip = 0; print }' "$_root/$ZAVET_DIR/RULES.md"
         printf '\n'
     fi
+    rule_ctx "$_root" "$_ctxmode"
     _decisions=$(cd -- "$_root" && cmd_list 2>/dev/null)
     if [ -n "$_decisions" ]; then
         printf '### Recorded decisions (read the file before changing guarded code; ask /zavet:why)\n\n'
@@ -5141,8 +5678,8 @@ cmd_version() {
     v=$(plugin_version)
     case "${1:-}" in
         --json)
-            printf '{"v":1,"plugin":"zavet","version":"%s","emit_schema":%s,"min_dira":"%s","specs_json":%s}\n' \
-                "$(json_escape "$v")" "$ZAVET_EMIT_SCHEMA" "$(json_escape "$ZAVET_MIN_DIRA")" "$ZAVET_SPECS_JSON"
+            printf '{"v":1,"plugin":"zavet","version":"%s","emit_schema":%s,"min_dira":"%s","specs_json":%s,"spec_sources_json":%s}\n' \
+                "$(json_escape "$v")" "$ZAVET_EMIT_SCHEMA" "$(json_escape "$ZAVET_MIN_DIRA")" "$ZAVET_SPECS_JSON" "$ZAVET_SPEC_SOURCES_JSON"
             ;;
         "") printf '%s\n' "$v" ;;
         *) die "usage: zavet version [--json]" ;;

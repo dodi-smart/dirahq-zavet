@@ -16,7 +16,8 @@ flips, no verification. It surfaces what a human should look at.
    `stale-spec slug n since-sha`, `stale-decision id n since-sha`,
    `guard-pressure id glob matched total`, `uncovered-invariant id file`,
    `long-record id lines`, `style-flag id-or-slug metric count`, and, for repos
-   with spec sources, the drift rows described in step 9.
+   with spec sources, the drift rows described in step 9 and the rule-source
+   rows described in step 10.
 3. **Conflicts** (unless focused elsewhere): for each `stale-decision`,
    worst drift first, open the record
    (`sh "${CLAUDE_PLUGIN_ROOT}/bin/zavet" decision-path <id>`), read its
@@ -68,10 +69,25 @@ flips, no verification. It surfaces what a human should look at.
    Report the counts and a few examples per class. Do not turn them into a
    score, a percentage, or a statement about compliance. The framework's task
    checkboxes are its own claim.
-10. Follow the writing-style rule in the zavet skill: plain, active voice, one idea
+10. **Framework rules** (only when linked frameworks bring rule files: a Spec
+   Kit constitution, OpenSpec project context, BMAD project context). Four
+   advisory rows, all facts:
+   - `rule-source-unresolved kind path reason`: zavet could not read the file.
+   - `rule-source-unratified kind path`: placeholder tokens, a `TODO(`, or a
+     Spec Kit Sync Impact Report comment is still committed.
+   - `rule-source-legacy kind path replacement`: the framework has deprecated
+     this file. Name what replaces it.
+   - `rule-source-newer-than-rules kind path sha`: the rule file changed after
+     the last change to `.zavet/RULES.md`. A human should re-read both.
+   Optionally, read each enabled rule file next to `.zavet/RULES.md` and name
+   places where they seem to overlap or contradict. Label every one as your
+   reading, not a zavet finding, and quote both lines. Edit neither file, and
+   never propose copying framework rules into `RULES.md`.
+11. Follow the writing-style rule in the zavet skill: plain, active voice, one idea
    per sentence, no em dashes, no jargon nouns, sentence case.
    Compose the report in that order. Conflicts, Stale specs, Guard pressure,
-   Unverified invariants, Over-long records, Style flags, Spec-source drift. Give each one
+   Unverified invariants, Over-long records, Style flags, Spec-source drift,
+   Framework rules. Give each one
    concrete next steps (`/zavet:decide` to supersede or correct, `/zavet:spec` to
    refresh, `/zavet:verify` to check, glob narrowing). End with the one-line
    health summary: N decisions (M stale, U unchecked), K specs (J stale),
