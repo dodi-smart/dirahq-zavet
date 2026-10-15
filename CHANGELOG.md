@@ -1,3 +1,9 @@
+## [1.9.1](https://github.com/dodi-smart/dirahq-zavet/compare/v1.9.0...v1.9.1) (2026-10-15)
+
+### 🐛 Bug Fixes
+
+* **plugin:** resolve specs --json oids from the repo top, not the cwd ([f5cd39d](https://github.com/dodi-smart/dirahq-zavet/commit/f5cd39dcc963292c992e36ded2995f8e902709b2))
+
 ## [1.9.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.8.0...v1.9.0) (2026-10-15)
 
 ### ✨ Features
