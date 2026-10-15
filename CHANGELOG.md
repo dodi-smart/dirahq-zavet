@@ -1,3 +1,9 @@
+## [1.9.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.8.0...v1.9.0) (2026-10-15)
+
+### ✨ Features
+
+* **plugin:** surface framework constitutions as rule sources that follow spec sources ([e0c991e](https://github.com/dodi-smart/dirahq-zavet/commit/e0c991ea3e0a49d000d6ff14da3d8eb4e3fbc514)), closes [#25](https://github.com/dodi-smart/dirahq-zavet/issues/25)
+
 ## [1.8.0](https://github.com/dodi-smart/dirahq-zavet/compare/v1.7.1...v1.8.0) (2026-10-12)
 
 ### ✨ Features
