@@ -2,3 +2,11 @@ schema: spec-driven
 version: 0.9.1
 context: |
   Fixture project. Tech stack: TypeScript.
+
+  All timestamps are UTC.
+rules:
+  proposal:
+    - Name the user who asked for the change.
+  specs:
+    - Use SHALL for every requirement.
+    - "Keep one scenario per requirement."

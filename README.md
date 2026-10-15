@@ -254,7 +254,7 @@ The cross-harness subcommands, in the order you would meet them:
 
 | Command | Purpose |
 |---|---|
-| `zavet spec-sources [--detect] [--write]` | Find spec frameworks in the repo (`openspec/`, `.specify/` + `specs/`, `_bmad/` plus its output folder, `docs/superpowers/`). `--detect` prints findings and writes nothing; `--write` adds `spec-source:` lines to `.zavet/config`. `zavet init` runs the same detection. |
+| `zavet spec-sources [--detect] [--write] [--json]` | Find spec frameworks in the repo (`openspec/`, `.specify/` + `specs/`, `_bmad/` plus its output folder, `docs/superpowers/`). `--detect` prints findings and writes nothing; `--write` adds `spec-source:` lines to `.zavet/config`. `zavet init` runs the same detection. The report also lists the framework rule files each source brings ([Rule sources](#rule-sources)); `--json` prints sources and rule sources as JSON Lines, metadata only. |
 | `zavet specs --json [--with-text]` | Every spec as JSON Lines, native and source-backed, one row per unit. No requirement or task text unless `--with-text`. See [Spec sources](#spec-sources). |
 | `zavet adapters [--check] [--cursor] [--grok] [--hk]` | Write (or drift-check) everything a repo needs off Claude Code: the vendored CLI, the `AGENTS.md` block, the git-hook templates, `.grok/rules/` + `.grok/hooks/` with `--grok` or when the repo already has a `.grok/`, optionally `.cursor/hooks.json`, and `.zavet/hk/Zavet.pkl` when the repo has an `hk.pkl`. Run by `zavet init`; re-run after upgrading the plugin. |
 | `zavet hooks install` | Point `core.hooksPath` at `.zavet/githooks` to activate the enforcement floor. Refuses to take over a `core.hooksPath` that already belongs to Husky or lefthook, and prints the one line to add instead. In a repo with an `hk.pkl` it never touches `core.hooksPath`: it checks that `hk.pkl` runs the zavet steps and that hk's hooks are installed. |
@@ -634,13 +634,67 @@ Spec: capture-pipeline, openspec:add-csv-import
   facts, never coverage.
 - Task checkboxes are the framework's claim and are recorded as that. zavet
   states no compliance percentage and never says a requirement is satisfied.
-- A Spec Kit `constitution.md` is reported next to `.zavet/RULES.md` and never
-  imported.
+- A framework's standing rules (a Spec Kit constitution, OpenSpec project
+  context) are surfaced next to `.zavet/RULES.md` and never imported. See
+  [Rule sources](#rule-sources).
 
 `zavet audit` adds four advisory drift rows for these units:
 `source-spec-edited-in-implementing-change`, `planned-not-touched`,
 `touched-not-planned` and `paths-none-yet`. They are facts that re-derive from
 git, not judgements.
+
+### Rule sources
+
+Spec frameworks keep standing rules of their own, and only their own commands
+read them. An agent working outside `/speckit.*` or `/opsx:*` never sees them.
+zavet puts them in front of the agent, next to `.zavet/RULES.md`, without
+copying them anywhere.
+
+Rule sources follow spec sources. Linking a framework (through `zavet init`,
+`/zavet:spec-adopt` or dira onboarding) turns its rule files on at their
+default paths. There is no extra step.
+
+| Spec source | Rule kind | Default file | In session context |
+|---|---|---|---|
+| `speckit` | `speckit-constitution` | `.specify/memory/constitution.md` | the text |
+| `openspec` | `openspec-config` | `<root>/config.yaml`, when it has `context:` or `rules:` | the `context` and `rules` |
+| `openspec` | `openspec-project-md` | `<root>/project.md` | a pointer, marked deprecated by OpenSpec |
+| `bmad` | `bmad-agents-block` | the `<!-- bmad:context -->` block in `AGENTS.md` | a pointer: the harness already loads `AGENTS.md` |
+| `bmad` | `bmad-project-context` | `<output_folder>/project-context.md` | a pointer, marked deprecated by BMAD |
+| `superpowers` | none | | superpowers defers to `CLAUDE.md` / `AGENTS.md` |
+
+Switch them off, or point one at another file, in `.zavet/config`:
+
+```
+rule-sources: off                                  # every rule source
+rule-source: speckit-constitution off              # one kind
+rule-source: openspec-config path/to/config.yaml   # a non-default file
+rule-source-max-lines: 60                          # per-source cap in session context (0 = pointer only)
+```
+
+What happens with them:
+
+- The session-start context gets a `### Framework rules` section after the
+  standing rules. It quotes each Spec Kit and OpenSpec source up to the cap
+  and says where to read on. It ends with one instruction: if a framework rule
+  conflicts with a standing rule or a decision, stop and ask.
+- The generated files (`AGENTS.md`, `.grok/rules/zavet.md`) get pointers only.
+  An amendment to a constitution never leaves a stale committed copy behind.
+- `zavet spec-sources --json` lists each rule source with its metadata: kind,
+  path, blob oid, version, ratified and last-amended dates, rule count,
+  `origin: external`, `verified: false`, and a state (`ok`, `unratified`,
+  `legacy`, `unresolved`, `file-missing` or `off`). It never carries the text.
+  dira reads it.
+- `zavet audit` adds four advisory rows: `rule-source-unresolved`,
+  `rule-source-unratified` (placeholder tokens, a `TODO(`, or a Spec Kit Sync
+  Impact Report comment still committed), `rule-source-legacy`, and
+  `rule-source-newer-than-rules` (the rule file was committed after the last
+  change to `.zavet/RULES.md`, so a human should re-read both).
+
+zavet never writes a rule file, never merges one into `RULES.md`, never follows
+a symlink out of the repo, and never marks a rule verified. Whether a framework
+rule and a standing rule overlap or conflict is a judgement. `/zavet:audit` may
+point one out, labelled as the agent's reading.
 
 ## Spec format
 

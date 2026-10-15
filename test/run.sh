@@ -315,7 +315,7 @@ cat >"$R/plugin/.claude-plugin/plugin.json" <<'EOF'
   "description": "fixture manifest for the version-contract tests"
 }
 EOF
-json_expected='{"v":1,"plugin":"zavet","version":"9.9.9-test","emit_schema":1,"min_dira":"0.1.0","specs_json":1}'
+json_expected='{"v":1,"plugin":"zavet","version":"9.9.9-test","emit_schema":1,"min_dira":"0.1.0","specs_json":1,"spec_sources_json":1}'
 
 assert_eq "version: bare, direct invocation" "9.9.9-test" "$(sh "$R/plugin/bin/zavet" version)"
 assert_eq "version: --json, direct invocation" "$json_expected" "$(sh "$R/plugin/bin/zavet" version --json)"
@@ -352,7 +352,7 @@ out=$(sh "$R2/plugin/bin/zavet" version --json)
 rc=$?
 assert_eq "version --json: missing manifest exits 0" "0" "$rc"
 assert_eq "version --json: missing manifest embeds unknown" \
-    '{"v":1,"plugin":"zavet","version":"unknown","emit_schema":1,"min_dira":"0.1.0","specs_json":1}' "$out"
+    '{"v":1,"plugin":"zavet","version":"unknown","emit_schema":1,"min_dira":"0.1.0","specs_json":1,"spec_sources_json":1}' "$out"
 
 # Byte-for-byte against the REAL shipped manifest, through the real $Z —
 # the actual contract dira-side installers will read.
@@ -2652,6 +2652,177 @@ printf '[core]\noutput_folder = "{project-root}/my out"\n' >"$R/_bmad/custom/con
 out=$(cd "$R" && sh "$Z" spec-sources --write)
 assert_has "write: a root with whitespace is reported invalid" "$out" "source-root-invalid	bmad	my out"
 assert_lacks "write: and never written" "$(cat "$R/.zavet/config")" "spec-source"
+
+# ----------------------------------------------------------- rule sources --
+printf -- '-- rule sources\n'
+# The rule rows of `spec-sources --json`, and the Framework rules section of
+# the hook and file context forms, run in $R.
+rule_json() { (cd "$R" && sh "$Z" spec-sources --json) | grep '"type":"rule-source"'; }
+rule_hook() { (cd "$R" && sh "$Z" context) | sed -n '/^### Framework rules/,/stop and ask/p'; }
+# Replace every .zavet/config line of $R matching $1 (a grep pattern) with $2.
+set_cfg_line() { # $1 pattern, $2 new line
+    printf '%s\n' "$2" >"$R/c.tmp"
+    grep -v -- "$1" "$R/.zavet/config" >>"$R/c.tmp"
+    mv "$R/c.tmp" "$R/.zavet/config"
+}
+
+# --- Spec Kit: on by default once the framework is linked ---------------------
+R="$TMP/rule-speckit"
+sdlc_repo "$R" speckit 'spec-source: speckit specs'
+row=$(rule_json)
+assert_has "speckit rule: on by default, no extra config line" "$row" '"kind":"speckit-constitution","path":".specify/memory/constitution.md","source":"default","enabled":true'
+assert_has "speckit rule: version and dates from the footer" "$row" '"version":"1.2.0","ratified":"2026-06-01","lastAmended":"2026-09-10","ruleCount":2'
+assert_has "speckit rule: external and never verified" "$row" '"origin":"external","verified":false,"state":"ok"'
+assert_has "speckit rule: the blob oid fingerprints the file" "$row" "\"oid\":\"$(git -C "$R" hash-object .specify/memory/constitution.md)\""
+assert_lacks "speckit rule: --json carries no rule text" "$row" 'Test first'
+assert_has "speckit rule: a spec-source row sits beside it" "$( (cd "$R" && sh "$Z" spec-sources --json) )" '{"v":1,"type":"spec-source","kind":"speckit","root":"specs","globs":[],"state":"ok","units":3,"unresolved":1}'
+assert_has "speckit rule: report row" "$( (cd "$R" && sh "$Z" spec-sources) )" "rule-source	speckit-constitution	.specify/memory/constitution.md	ok	1.2.0	2026-09-10"
+ctx=$(rule_hook)
+assert_has "speckit rule: hook context labels the source" "$ctx" '- .specify/memory/constitution.md (Spec Kit constitution, v1.2.0, amended 2026-09-10)'
+assert_has "speckit rule: hook context quotes the principles" "$ctx" '> ### I. Test first'
+assert_lacks "speckit rule: the H1 is dropped" "$ctx" '# Photo Albums Constitution'
+assert_has "speckit rule: the closing line names who owns the rules" "$ctx" 'These rules belong to their framework and zavet has not verified them.'
+assert_lacks "speckit rule: specs --json still never mentions the constitution" "$( (cd "$R" && sh "$Z" specs --json) )" 'constitution'
+(cd "$R" && sh "$Z" agents-md) >/dev/null
+assert_has "speckit rule: AGENTS.md gets the pointer" "$(cat "$R/AGENTS.md")" '- .specify/memory/constitution.md (Spec Kit constitution'
+assert_lacks "speckit rule: AGENTS.md never gets the text" "$(cat "$R/AGENTS.md")" 'Test first'
+# An amendment leaves the committed context file current: it holds no text.
+gc add -A && gc commit -qm "chore: agents" >/dev/null
+sed 's/before the code/before any code/' "$R/.specify/memory/constitution.md" >"$R/c.tmp" && mv "$R/c.tmp" "$R/.specify/memory/constitution.md"
+assert_eq "speckit rule: an amendment does not stale AGENTS.md" "0" "$( (cd "$R" && sh "$Z" agents-md --check >/dev/null 2>&1); echo $?)"
+# The cap, then pointer-only at zero.
+printf 'rule-source-max-lines: 3\n' >>"$R/.zavet/config"
+ctx=$(rule_hook)
+assert_has "speckit rule: the cap truncates and says where to read on" "$ctx" '> … truncated after 3 lines; read .specify/memory/constitution.md for the rest'
+assert_lacks "speckit rule: nothing past the cap" "$ctx" 'Plain storage'
+set_cfg_line '^rule-source-max-lines' 'rule-source-max-lines: 0'
+ctx=$(rule_hook)
+assert_lacks "speckit rule: a zero cap is pointer-only" "$ctx" '> '
+# Off, one kind.
+printf 'rule-source: speckit-constitution off\n' >>"$R/.zavet/config"
+assert_eq "speckit rule: a kind switched off leaves the context" "" "$(rule_hook)"
+assert_has "speckit rule: and reports enabled false" "$(rule_json)" '"enabled":false'
+assert_has "speckit rule: with state off" "$(rule_json)" '"state":"off"'
+
+# --- the newer-than-rules audit row fires and clears --------------------------
+R="$TMP/rule-audit"
+sdlc_repo "$R" speckit 'spec-source: speckit specs'
+printf '# Standing rules\n\n- One.\n' >"$R/.zavet/RULES.md"
+gc add -A && gc commit -qm "docs: rules" >/dev/null
+assert_lacks "audit: a constitution older than RULES.md is quiet" "$( (cd "$R" && sh "$Z" audit) )" 'rule-source-newer-than-rules'
+printf '\nAmended.\n' >>"$R/.specify/memory/constitution.md"
+gc add -A && gc commit -qm "docs: amend constitution" >/dev/null
+sha=$(git -C "$R" rev-parse --short=7 HEAD)
+assert_has "audit: an amendment after RULES.md is reported" "$( (cd "$R" && sh "$Z" audit) )" "rule-source-newer-than-rules	speckit-constitution	.specify/memory/constitution.md	$sha"
+printf -- '- Two.\n' >>"$R/.zavet/RULES.md"
+gc add -A && gc commit -qm "docs: review rules" >/dev/null
+assert_lacks "audit: reviewing RULES.md clears it" "$( (cd "$R" && sh "$Z" audit) )" 'rule-source-newer-than-rules'
+
+# --- Spec Kit, unratified ------------------------------------------------------
+R="$TMP/rule-unratified"
+sdlc_repo "$R" speckit-unratified 'spec-source: speckit specs'
+row=$(rule_json)
+assert_has "unratified: state and reason" "$row" '"state":"unratified","reason":"Sync Impact Report comment is still committed"'
+assert_has "unratified: placeholder version is null" "$row" '"version":null,"ratified":null,"lastAmended":"2026-10-01"'
+assert_has "unratified: audit row" "$( (cd "$R" && sh "$Z" audit) )" "rule-source-unratified	speckit-constitution	.specify/memory/constitution.md"
+ctx=$(rule_hook)
+assert_lacks "unratified: the Sync Impact Report is stripped from context" "$ctx" 'Sync Impact Report'
+assert_has "unratified: the label says so" "$ctx" 'not ratified yet'
+
+# --- OpenSpec ------------------------------------------------------------------
+R="$TMP/rule-openspec"
+sdlc_repo "$R" openspec 'spec-source: openspec openspec'
+row=$(rule_json)
+assert_has "openspec rule: config.yaml is on by default" "$row" '"kind":"openspec-config","path":"openspec/config.yaml","source":"default","enabled":true'
+assert_has "openspec rule: rules are counted" "$row" '"ruleCount":3'
+ctx=$(rule_hook)
+assert_has "openspec rule: the context block, unindented" "$ctx" '> Fixture project. Tech stack: TypeScript.'
+assert_has "openspec rule: blank lines inside the block survive" "$ctx" '> All timestamps are UTC.'
+assert_has "openspec rule: rules keyed by artifact" "$ctx" '> - specs: Keep one scenario per requirement.'
+assert_lacks "openspec rule: the schema key is not a rule" "$ctx" 'spec-driven'
+R="$TMP/rule-openspec-legacy"
+sdlc_repo "$R" openspec-legacy 'spec-source: openspec openspec'
+row=$(rule_json)
+assert_has "openspec legacy: project.md is legacy" "$row" '"kind":"openspec-project-md","path":"openspec/project.md","source":"default","enabled":true'
+assert_has "openspec legacy: with the replacement" "$row" '"state":"legacy","reason":"deprecated by OpenSpec: move it into openspec/config.yaml context"'
+assert_has "openspec legacy: audit row" "$( (cd "$R" && sh "$Z" audit) )" "rule-source-legacy	openspec-project-md	openspec/project.md"
+assert_lacks "openspec legacy: project.md is a pointer, never text" "$(rule_hook)" 'Python 3.12'
+
+# --- BMAD ------------------------------------------------------------------------
+R="$TMP/rule-bmad"
+sdlc_repo "$R" bmad-612 'spec-source: bmad _bmad-output'
+row=$(rule_json)
+assert_has "bmad rule: the AGENTS.md block" "$row" '"kind":"bmad-agents-block","path":"AGENTS.md","source":"default","enabled":true'
+assert_has "bmad rule: block lines counted" "$row" '"ruleCount":2'
+assert_lacks "bmad rule: the block is a pointer, never re-injected" "$(rule_hook)" 'integer cents'
+block() { awk '/<!-- bmad:context -->/,/<!-- \/bmad:context -->/' "$R/AGENTS.md"; }
+before=$(block)
+(cd "$R" && sh "$Z" agents-md) >/dev/null
+assert_eq "bmad rule: agents-md round-trips the bmad block byte for byte" "$before" "$(block)"
+assert_has "bmad rule: and adds its own block beside it" "$(cat "$R/AGENTS.md")" '<!-- zavet:agents:start -->'
+R="$TMP/rule-bmad-legacy"
+sdlc_repo "$R" bmad-legacy 'spec-source: bmad _bmad-output'
+row=$(rule_json)
+assert_has "bmad legacy: project-context.md is legacy" "$row" '"kind":"bmad-project-context","path":"_bmad-output/project-context.md","source":"default","enabled":true'
+assert_has "bmad legacy: audit row" "$( (cd "$R" && sh "$Z" audit) )" "rule-source-legacy	bmad-project-context	_bmad-output/project-context.md"
+
+# --- superpowers, undeclared frameworks, the global switch ------------------------
+R="$TMP/rule-superpowers"
+sdlc_repo "$R" superpowers 'spec-source: superpowers docs/superpowers'
+assert_eq "superpowers: no rule source" "" "$(rule_json)"
+R="$TMP/rule-undeclared"
+sdlc_repo "$R" speckit
+assert_eq "undeclared: an unlinked framework contributes nothing" "" "$(rule_json)"
+assert_eq "undeclared: and nothing to context" "" "$(rule_hook)"
+assert_has "undeclared: --detect shows what linking would bring" "$( (cd "$R" && sh "$Z" spec-sources --detect) )" "rule-source	speckit-constitution	.specify/memory/constitution.md	on"
+R="$TMP/rule-alloff"
+sdlc_repo "$R" speckit 'spec-source: speckit specs' 'rule-sources: off'
+assert_eq "all off: context is silent" "" "$(rule_hook)"
+assert_has "all off: --detect says off" "$( (cd "$R" && sh "$Z" spec-sources --detect) )" "rule-source	speckit-constitution	.specify/memory/constitution.md	off"
+
+# --- overrides and fail-open --------------------------------------------------------
+R="$TMP/rule-override"
+sdlc_repo "$R" speckit 'spec-source: speckit specs' 'rule-source: speckit-constitution docs/constitution.md'
+mkdir -p "$R/docs"
+printf '# C\n\n### I. Moved\nRules live here now.\n' >"$R/docs/constitution.md"
+assert_has "override: a non-default path" "$(rule_json)" '"kind":"speckit-constitution","path":"docs/constitution.md","source":"override"'
+assert_has "override: its text reaches context" "$(rule_hook)" '> Rules live here now.'
+R="$TMP/rule-failopen"
+sdlc_repo "$R" speckit 'spec-source: speckit specs' 'rule-source: openspec-config ../outside.yaml' 'rule-source: openspec-project-md gone.md' 'rule-source: kiro-steering .kiro'
+row=$(rule_json)
+assert_has "fail-open: a path escaping the repo is unresolved" "$row" '"kind":"openspec-config","path":"../outside.yaml","source":"override","enabled":true,"oid":null'
+assert_has "fail-open: with the reason" "$row" '"state":"unresolved","reason":"invalid path"'
+assert_has "fail-open: a missing file" "$row" '"state":"file-missing","reason":"file missing"'
+assert_has "fail-open: an unknown kind" "$row" '"kind":"kiro-steering"'
+assert_has "fail-open: context still renders the good one" "$(rule_hook)" '> ### I. Test first'
+assert_has "fail-open: audit reports the bad ones" "$( (cd "$R" && sh "$Z" audit) )" "rule-source-unresolved	openspec-config	../outside.yaml	invalid path"
+ln -s /etc/hosts "$R/.specify/memory/constitution.md.lnk"
+set_cfg_line speckit-constitution 'rule-source: speckit-constitution .specify/memory/constitution.md.lnk'
+assert_has "fail-open: a symlink is never opened" "$(rule_json)" '"state":"unresolved","reason":"symlink or path outside the repo"'
+assert_lacks "fail-open: nor quoted" "$(rule_hook)" 'localhost'
+: >"$R/empty.md"
+set_cfg_line speckit-constitution 'rule-source: speckit-constitution empty.md'
+assert_has "fail-open: an empty file is unresolved" "$(rule_json)" '"state":"unresolved","reason":"empty file"'
+printf 'context: |\nrules:\n' >"$R/bad.yaml"
+set_cfg_line openspec-config 'rule-source: openspec-config bad.yaml'
+assert_has "fail-open: a config.yaml with no rules is unresolved" "$(rule_json)" '"reason":"no context or rules"'
+assert_eq "fail-open: context exits 0" "0" "$( (cd "$R" && sh "$Z" context >/dev/null 2>&1); echo $?)"
+
+# --- read-only over every rule file -------------------------------------------------
+R="$TMP/rule-readonly"
+sdlc_repo "$R" bmad-612 'spec-source: bmad _bmad-output'
+cp -R "$SDLC/speckit/.specify" "$R/"
+cp -R "$SDLC/openspec/openspec" "$R/"
+printf 'spec-source: speckit specs\nspec-source: openspec openspec\n' >>"$R/.zavet/config"
+mkdir -p "$R/specs"
+gc add -A && gc commit -qm "chore: frameworks" >/dev/null
+rdigest() { (cd "$R" && { git hash-object .specify/memory/constitution.md openspec/config.yaml; awk '/<!-- bmad:context -->/,/<!-- \/bmad:context -->/' AGENTS.md | git hash-object --stdin; }); }
+before=$(rdigest)
+for c in "spec-sources --write" "spec-sources --json" "index" "rules" "agents-md" "audit" "context" "adapters"; do
+    # shellcheck disable=SC2086 # $c is a command line, split on purpose
+    (cd "$R" && sh "$Z" $c) >/dev/null 2>&1
+done
+assert_eq "read-only: no command writes a rule file" "$before" "$(rdigest)"
 
 # ---------------------------------------------------------------- summary --
 if [ "$fails" -gt 0 ]; then
