@@ -3038,10 +3038,12 @@ sdlc_hist_release() {
 }
 
 # path<TAB>blob oid for every file row of a stream. Working-tree content, so it
-# reflects what is on disk even before a commit.
+# reflects what is on disk even before a commit. Stream paths are top-relative,
+# so the existence probe runs from the top: from a subdirectory every getline
+# would miss and every oid would come out null.
 sdlc_oids() { # $1 = top, $2 = stream file, $3 = output file
     : >"$3"
-    awk -F '\t' '$1 == "F" { if ((getline x < $3) >= 0) print $3; close($3) }' "$2" >"$3.list" 2>/dev/null || return 0
+    (cd -- "$1" && awk -F '\t' '$1 == "F" { if ((getline x < $3) >= 0) print $3; close($3) }' "$2") >"$3.list" 2>/dev/null || return 0
     git -C "$1" hash-object --stdin-paths <"$3.list" >"$3.oid" 2>/dev/null || return 0
     awk 'NR == FNR { p[FNR] = $0; next } { print p[FNR] "\t" $0 }' "$3.list" "$3.oid" >"$3" 2>/dev/null
     rm -f "$3.list" "$3.oid"
