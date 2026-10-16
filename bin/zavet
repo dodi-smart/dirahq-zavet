@@ -3797,6 +3797,7 @@ cmd_spec_sources() {
 # run_match the hooks use, so CI semantics == hook semantics.
 #
 # stdout (TSV): violation<TAB>sha7<TAB>ids<TAB>subject
+#               skip-release<TAB>sha7<TAB>ids<TAB>subject  (see is_release_commit)
 #               warn-spec<TAB>sha7<TAB>slugs<TAB>subject
 # stderr: human summary. Exit 1 iff violations.
 # A generated context file that no longer matches the records it summarizes.
@@ -3930,6 +3931,37 @@ EOF
     return 1
 }
 
+# A release tool's version-bump commit: exempt from the guard wall, never from
+# anything else.
+#
+# semantic-release commits the bumped version file (Cargo.toml, package.json,
+# plugin.json) straight onto develop/main. When a decision guards that file,
+# every promotion PR (develop → main) carries those commits in its range and
+# fails on a trailer no bot can write. That is a false positive nobody on the
+# PR can act on, and a check that is red on every promotion teaches people to
+# merge over it — which is exactly how a real violation gets through.
+#
+# BOTH halves must hold, so neither alone opens a hole:
+#   - author is a bot identity: a GitHub App (`name[bot]`, or its
+#     `…[bot]@users.noreply.github.com` address), or `semantic-release-bot`,
+#     semantic-release's default committer when GIT_AUTHOR_NAME is unset;
+#   - subject is the release commit shape: `chore(release): … [skip ci]`.
+# A human's `chore(release):` commit is still checked, and so is any other
+# commit a bot makes (a pricing refresh, a sync) — those can carry a trailer.
+# Forging both is possible, but anyone able to do that can equally write the
+# trailer; the guard wall is a review prompt, not an access control.
+is_release_commit() { # $1 = sha
+    git log -1 --format='%an%x09%ae%x09%s' "$1" -- 2>/dev/null | awk -F'\t' '
+        {
+            bot = ($1 ~ /\[bot\]$/ || $1 == "semantic-release-bot" ||
+                   $2 ~ /\[bot\]@users\.noreply\.github\.com$/)
+            rel = ($3 ~ /^chore\(release\)!?: / && index($3, "[skip ci]") > 0)
+            exit !(bot && rel)
+        }
+        END { if (NR == 0) exit 1 }
+    '
+}
+
 cmd_check() {
     [ $# -ge 1 ] || die "usage: zavet check <rev-range>"
     top=$(repo_toplevel) || die "not inside a git repository"
@@ -3972,6 +4004,7 @@ cmd_check() {
     spec_set="$nl$(git rev-list --no-merges -E --grep="$ZAVET_SPEC_RE" "$@" --)$nl"
     violations=0
     warnings=0
+    releases=0
     for sha in $all; do
         need_guard=1
         need_spec=1
@@ -3986,9 +4019,16 @@ cmd_check() {
             ids=$(printf '%s\n' "$changed" | run_match "$guards_table" | tr '\n' ' ')
             ids=${ids% }
             if [ -n "$ids" ]; then
-                violations=$((violations + 1))
                 info=$(git log -1 --format="%h${tab}%s" "$sha")
-                printf 'violation\t%s\t%s\t%s\n' "${info%%"$tab"*}" "$ids" "${info#*"$tab"}"
+                # Decided only once a guard actually matched, so the author
+                # lookup costs nothing on the common path.
+                if is_release_commit "$sha"; then
+                    releases=$((releases + 1))
+                    printf 'skip-release\t%s\t%s\t%s\n' "${info%%"$tab"*}" "$ids" "${info#*"$tab"}"
+                else
+                    violations=$((violations + 1))
+                    printf 'violation\t%s\t%s\t%s\n' "${info%%"$tab"*}" "$ids" "${info#*"$tab"}"
+                fi
             fi
         fi
         if [ $need_spec -eq 1 ]; then
@@ -4021,9 +4061,12 @@ cmd_check() {
     done
     # Two counters, two messages: conflating them would report a tree-wide
     # authoring error as a count of commits, which is not actionable.
-    # Two counters, two messages: conflating them would report a tree-wide
-    # authoring error as a count of commits, which is not actionable.
     rc=0
+    # Said out loud, never silent: an exemption nobody can see is
+    # indistinguishable from a check that stopped looking.
+    if [ "$releases" -gt 0 ]; then
+        printf 'zavet check: %s release commit(s) by a bot skipped for guard trailers (chore(release): … [skip ci]).\n' "$releases" >&2
+    fi
     if [ "$violations" -gt 0 ]; then
         printf 'zavet check: %s commit(s) touch guarded paths without a Refs:/Supersedes: trailer — amend or rebase to add them.\n' "$violations" >&2
         rc=1

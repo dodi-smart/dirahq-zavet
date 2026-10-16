@@ -195,6 +195,35 @@ else
     fail "check summary on stderr"
 fi
 
+# Release commits: a bot's `chore(release): … [skip ci]` bumping a guarded
+# version file is skipped (and said so); each half alone is still a violation.
+rel_base=$(gc rev-parse HEAD)
+bot_commit() { # $1 name, $2 email, $3 subject
+    echo "$3" >"$R/src/a/ver.rs" && gc add -A &&
+        GIT_AUTHOR_NAME="$1" GIT_AUTHOR_EMAIL="$2" gc commit -qm "$3"
+}
+bot_commit semantic-release-bot semantic-release-bot@martynus.net "chore(release): v1.2.3 [skip ci]"
+bot_commit "github-actions[bot]" 41898282+github-actions[bot]@users.noreply.github.com "chore(release): v1.2.4-develop.1 [skip ci]"
+bot_commit "zavet test" zavet-test@example.invalid "chore(release): v1.2.5 [skip ci]"
+bot_commit semantic-release-bot semantic-release-bot@martynus.net "chore(release): v1.2.6"
+bot_commit "renovate[bot]" 29139614+renovate[bot]@users.noreply.github.com "fix(deps): bump x [skip ci]"
+out=$( (cd "$R" && sh "$Z" check "$rel_base..HEAD" 2>"$TMP/check.err") )
+rc=$?
+assert_eq "release: exit 1 while a non-release commit violates" "1" "$rc"
+assert_eq "release: bot release commits skipped, the rest still violate" "skip-release	D-0001	chore(release): v1.2.3 [skip ci]
+skip-release	D-0001	chore(release): v1.2.4-develop.1 [skip ci]
+violation	D-0001	chore(release): v1.2.5 [skip ci]
+violation	D-0001	chore(release): v1.2.6
+violation	D-0001	fix(deps): bump x [skip ci]" "$(printf '%s\n' "$out" | cut -f1,3,4 | sort)"
+if grep -q "2 release commit(s) by a bot skipped" "$TMP/check.err"; then
+    pass "release: skip is reported on stderr"
+else
+    fail "release: skip is reported on stderr"
+fi
+rel_top=$(gc rev-list --reverse "$rel_base..HEAD" | sed -n 2p)
+out=$( (cd "$R" && sh "$Z" check "$rel_base..$rel_top" 2>/dev/null) )
+assert_eq "release: a range of only bot release commits passes" "0" "$?"
+
 out=$( (cd "$R" && sh "$Z" check "$base..$base" 2>/dev/null) )
 assert_eq "check empty range passes" "0:" "$?:$out"
 
