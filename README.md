@@ -370,6 +370,15 @@ because both are properties of the records rather than of the commits:
 Exit code `1` on any of the three; repos without `.zavet/` pass, so one
 org-wide workflow is safe.
 
+**Release commits are skipped for guard trailers, and said so.** A commit whose
+author is a bot (a GitHub App's `name[bot]` identity, or
+`semantic-release-bot`) **and** whose subject is `chore(release): … [skip ci]`
+gets a `skip-release` row instead of a `violation`, plus a one-line count on
+stderr. Release tools commit the bumped version file straight onto the release
+branches, so when a decision guards that file every promotion PR (develop →
+main) would fail on a trailer no bot can write. Either half alone is still
+checked: a person's release-shaped commit, or any other commit a bot makes.
+
 ```yaml
 - uses: actions/checkout@v4
   with:
@@ -379,7 +388,7 @@ org-wide workflow is safe.
 ```
 
 For push builds: `git fetch origin main && sh bin/zavet check origin/main..HEAD`.
-Output is TSV (`violation` / `warn-spec` / `violation-duplicate-id` /
+Output is TSV (`violation` / `skip-release` / `warn-spec` / `violation-duplicate-id` /
 `violation-errata` rows) with a human summary on stderr.
 
 `fetch-depth: 0` matters for a second reason: `zavet next-id` takes the next

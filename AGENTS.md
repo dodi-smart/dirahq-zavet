@@ -57,6 +57,17 @@ instance — so a clean local run is not proof. Reproduce the CI version with:
 docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:latest bin/zavet hooks/scripts/*.sh test/*.sh scripts/*.sh
 ```
 
+**`zavet check` exempts release commits and nothing else.** `is_release_commit`
+needs BOTH a bot author (`*[bot]`, `semantic-release-bot`, or a
+`…[bot]@users.noreply.github.com` address) AND a `chore(release): … [skip ci]`
+subject, and every skip prints a `skip-release` row. semantic-release commits the
+bumped version file onto develop/main, so a decision guarding `Cargo.toml` or
+`package.json` failed every promotion PR on a trailer no bot can write, and
+people merged over the red check. Do not widen this to all bots, or to the
+subject alone: a scheduled bot commit can carry a trailer, and so can a person.
+The org's shared CI action applies the same rule in its own script, because it
+runs each repo's vendored CLI, which may predate this; keep the two in step.
+
 **Hooks fail open, always.** Every path in `zavet hook` and every script under
 `hooks/scripts/` must exit 0 and print nothing when anything is unexpected — no
 `jq`, no `git`, an unreadable file, a repo without `.zavet/`. A guard that wedges
