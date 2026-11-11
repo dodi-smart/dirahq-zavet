@@ -1,3 +1,13 @@
+## [1.9.2](https://github.com/dodi-smart/dirahq-zavet/compare/v1.9.1...v1.9.2) (2026-11-11)
+
+### 🐛 Bug Fixes
+
+* **plugin:** skip release bot version bumps in zavet check guard trailers ([64d2aaf](https://github.com/dodi-smart/dirahq-zavet/commit/64d2aaf5a6b8f2414baf4e0a8f7d14f457656dd8))
+
+### 📚 Documentation
+
+* **repo:** ask reader-facing output to answer first, per the Letopis screen principle ([6a852c2](https://github.com/dodi-smart/dirahq-zavet/commit/6a852c2a5b9d8e48b4fe7b823dfee3246c7f230b))
+
 ## [1.9.1](https://github.com/dodi-smart/dirahq-zavet/compare/v1.9.0...v1.9.1) (2026-10-15)
 
 ### 🐛 Bug Fixes
