@@ -114,6 +114,12 @@ only, no meaning change" in the commit so the diff is trusted without a re-read.
 Never use that path to soften, hedge, or add a claim. That is a correction
 (`corrected-by:`) or a new decision. This applies to the fixtures too.
 
+**Reader-facing output answers first.** This is the Letopis suite principle, recorded in `dirahq-cloud` as
+D-0090. It covers `zavet wiki`, audit summaries and anything a person reads.
+- Open with at most four sentences or figures that a non-technical reader can act on.
+- Put lists and method notes after the answer, never above it.
+- Write missing data in words, never as `0`.
+
 ## The vendored fixture corpus
 
 `test/fixtures/dialect/` is a copy; the canonical one lives in `dirahq-cli` at
